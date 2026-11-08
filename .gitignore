@@ -1,0 +1,28 @@
+# 真实配置与机密（绝不入库）
+config.json
+*.token
+token
+.env
+.env.*
+secrets/
+*.pem
+*.pfx
+
+# 运行时产物
+logs/
+requests/
+backup/
+heartbeat.json
+state.txt
+*.log
+
+# 二进制与工具
+*.exe
+cloudflared*
+bin/
+
+# 系统与编辑器
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
