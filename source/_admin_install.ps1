@@ -41,7 +41,7 @@ if ($VerifyOnly) {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $isAdmin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     Write-Host ("管理员权限: {0}" -f $isAdmin); if (-not $isAdmin) { $ok = $false }
-    foreach ($n in @('ParentGuard.ps1','GuardCore.ps1','UsageMeter.ps1','RemotePanel.ps1','watchdog.ps1','health.ps1','Show-Blocked.ps1','RunHidden.vbs')) {
+    foreach ($n in @('ParentGuard.ps1','GuardCore.ps1','UsageMeter.ps1','RemotePanel.ps1','watchdog.ps1','health.ps1','Show-Blocked.ps1','Join-Fleet.ps1','RunHidden.vbs')) {
         $exists = Test-Path (Join-Path $PSScriptRoot $n)
         Write-Host ("文件 {0}: {1}" -f $n, $exists); if (-not $exists) { $ok = $false }
     }
@@ -66,7 +66,7 @@ Write-Step '目录已准备'
 
 # 复制文件
 $srcDir = $PSScriptRoot
-foreach ($name in @('ParentGuard.ps1', 'GuardCore.ps1', 'UsageMeter.ps1', 'watchdog.ps1', 'Show-Blocked.ps1', 'RemotePanel.ps1', 'health.ps1', 'RunHidden.vbs', 'cloudflared-panel.ps1', 'cloudflared.exe')) {
+foreach ($name in @('ParentGuard.ps1', 'GuardCore.ps1', 'UsageMeter.ps1', 'watchdog.ps1', 'Show-Blocked.ps1', 'RemotePanel.ps1', 'health.ps1', 'Join-Fleet.ps1', 'RunHidden.vbs', 'cloudflared-panel.ps1', 'cloudflared.exe')) {
     $s = Join-Path $srcDir $name
     $d = Join-Path $script:GuardRoot $name
     if (Test-Path -LiteralPath $s) {

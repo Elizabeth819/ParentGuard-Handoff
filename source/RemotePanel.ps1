@@ -91,6 +91,17 @@ input:focus{border-color:var(--brand)}
 .usage-devices{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .dev-chip{font-size:13px;padding:7px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);color:var(--muted)}
 .dev-chip.active{border-color:var(--brand);color:var(--text);background:rgba(108,124,255,.14)}
+.fleet-list{margin-top:10px}
+.fleet-row{display:flex;align-items:center;gap:9px;border-top:1px dashed rgba(141,151,171,.18);padding:9px 0}
+.fleet-row:first-child{border-top:none;padding-top:2px}
+.fleet-dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:0 0 auto}
+.fleet-dot.on{background:var(--green);box-shadow:0 0 0 4px rgba(52,211,153,.14)}
+.fleet-mid{flex:1;min-width:0}
+.fleet-name{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fleet-sub{color:var(--muted);font-size:11.5px;margin-top:2px}
+.fleet-hint{color:var(--muted);font-size:12px;line-height:1.6;margin-top:8px}
+.join-box{margin-top:10px;background:rgba(108,124,255,.12);border:1px solid var(--brand);border-radius:11px;padding:11px 13px;font-size:12.5px;line-height:1.6}
+.join-code{font-size:20px;font-weight:700;letter-spacing:.12em;font-variant-numeric:tabular-nums;margin-top:5px}
 .usage-days{display:flex;gap:8px;margin-top:10px}
 .day-btn{flex:1;padding:8px;font-size:13px;color:var(--muted)}
 .day-btn.active{color:var(--text);border-color:var(--brand);background:rgba(108,124,255,.14)}
@@ -198,9 +209,14 @@ input:focus{border-color:var(--brand)}
   <div class="card">
     <div class="card-head">
       <h2>设备与程序用量</h2>
-      <button class="ghost" id="usageRefreshBtn">刷新</button>
+      <div style="display:flex;gap:8px">
+        <button class="ghost" id="joinCodeBtn">生成配对码</button>
+        <button class="ghost" id="usageRefreshBtn">刷新</button>
+      </div>
     </div>
     <div class="usage-devices" id="usageDevices"></div>
+    <div class="fleet-list" id="fleetList"></div>
+    <div id="fleetJoin"></div>
     <div class="usage-days">
       <button class="day-btn active" data-day="0">今天</button>
       <button class="day-btn" data-day="1">昨天</button>
@@ -244,10 +260,15 @@ input:focus{border-color:var(--brand)}
   var toastEl = document.getElementById("toast");
   var toastTimer = null;
   var refreshTimer = null;
-  var usageDevice = "";
+  var usageDevice = "__all__";
+  var lastRequests = [];
   var usageDay = 0;
   var siteReportRange = "day";
   var sitePanels = {};
+
+  function deviceParam() {
+    return usageDevice === "__all__" ? "" : usageDevice;
+  }
 
   function toast(message, isError) {
     toastEl.textContent = message;
@@ -374,15 +395,18 @@ input:focus{border-color:var(--brand)}
   function renderRequests(items) {
     var list = document.getElementById("requestList");
     list.textContent = "";
-    items = normalizeArray(items);
-    if (!items.length) {
+    lastRequests = normalizeArray(items);
+    var visible = lastRequests.filter(function (item) {
+      return usageDevice === "__all__" || !item.device || item.device === usageDevice;
+    });
+    if (!visible.length) {
       var empty = document.createElement("div");
       empty.className = "empty";
       empty.textContent = "暂无待处理申请";
       list.appendChild(empty);
       return;
     }
-    items.forEach(function (item) {
+    visible.forEach(function (item) {
       var row = document.createElement("div");
       row.className = "request";
 
@@ -402,11 +426,27 @@ input:focus{border-color:var(--brand)}
       top.appendChild(time);
       row.appendChild(top);
 
+      if (item.device) {
+        var devLine = document.createElement("div");
+        devLine.className = "time";
+        devLine.textContent = "来自 " + item.device;
+        row.appendChild(devLine);
+      }
+
       if (item.reason) {
         var reason = document.createElement("div");
         reason.className = "reason";
         reason.textContent = item.reason;
         row.appendChild(reason);
+      }
+
+      if (item.status === "queued") {
+        var queued = document.createElement("div");
+        queued.className = "reason";
+        queued.textContent = "已下发决定，等待设备上线后自动生效";
+        row.appendChild(queued);
+        list.appendChild(row);
+        return;
       }
 
       var ops = document.createElement("div");
@@ -445,18 +485,82 @@ input:focus{border-color:var(--brand)}
       box.innerHTML = '<div class="empty">暂无设备数据，守护任务运行后自动出现</div>';
       return;
     }
-    if (!usageDevice || !items.some(function (d) { return d.name === usageDevice; })) {
-      var cur = items.filter(function (d) { return d.current; });
-      usageDevice = (cur.length ? cur[0] : items[0]).name;
+    if (items.length === 1) {
+      usageDevice = items[0].name;
+    } else {
+      var allBtn = document.createElement("button");
+      allBtn.className = "dev-chip" + (usageDevice === "__all__" ? " active" : "");
+      allBtn.textContent = "全部设备";
+      allBtn.addEventListener("click", function () {
+        usageDevice = "__all__";
+        renderRequests(lastRequests);
+        loadUsage();
+      });
+      box.appendChild(allBtn);
+      if (usageDevice !== "__all__" && !items.some(function (d) { return d.name === usageDevice; })) {
+        usageDevice = "__all__";
+      }
     }
     items.forEach(function (d) {
       var chip = document.createElement("button");
       chip.className = "dev-chip" + (d.name === usageDevice ? " active" : "");
       chip.textContent = d.name;
-      chip.title = "最近活跃：" + (d.lastActive || "未知");
-      chip.addEventListener("click", function () { usageDevice = d.name; loadUsage(); });
+      chip.title = "最近活跃：" + (d.lastActive || "未知") +
+        (d.fleet ? (d.online ? " · 在线" : " · 离线") : "");
+      chip.addEventListener("click", function () {
+        usageDevice = d.name;
+        renderRequests(lastRequests);
+        loadUsage();
+      });
       box.appendChild(chip);
     });
+  }
+
+  function renderFleet(items) {
+    var box = document.getElementById("fleetList");
+    box.textContent = "";
+    items = normalizeArray(items).filter(function (d) { return d.status !== "removed"; });
+    if (!items.length) {
+      var hint = document.createElement("div");
+      hint.className = "fleet-hint";
+      hint.textContent = "还没有其他设备加入：点右上角「生成配对码」，在子机上填写主机地址与该配对码即可。";
+      box.appendChild(hint);
+      return;
+    }
+    items.forEach(function (d) {
+      var row = document.createElement("div");
+      row.className = "fleet-row";
+      var dot = document.createElement("span");
+      dot.className = "fleet-dot" + (d.online ? " on" : "");
+      var mid = document.createElement("div");
+      mid.className = "fleet-mid";
+      var nm = document.createElement("div");
+      nm.className = "fleet-name";
+      nm.textContent = d.name;
+      var sub = document.createElement("div");
+      sub.className = "fleet-sub";
+      sub.textContent = (d.online ? "在线" : "离线") + " · 最后上报 " + (d.lastSeen || "从未");
+      mid.appendChild(nm);
+      mid.appendChild(sub);
+      var remove = document.createElement("button");
+      remove.className = "ghost";
+      remove.textContent = "移除";
+      remove.addEventListener("click", function () {
+        if (!confirm("移除设备「" + d.name + "」？移除后需要重新配对才能上报。")) { return; }
+        act("/api/fleet/devices/remove", { id: d.id }, "已移除该设备");
+      });
+      row.appendChild(dot);
+      row.appendChild(mid);
+      row.appendChild(remove);
+      box.appendChild(row);
+    });
+  }
+
+  function loadFleet() {
+    if (!token) { return Promise.resolve(); }
+    return api("/api/fleet/devices").then(function (d) {
+      renderFleet(d.items);
+    }).catch(function () { });
   }
 
   function renderUsage(data) {
@@ -545,7 +649,7 @@ input:focus{border-color:var(--brand)}
       btn.classList.remove("open");
       return;
     }
-    api("/api/sites?device=" + encodeURIComponent(usageDevice) +
+    api("/api/sites?device=" + encodeURIComponent(deviceParam()) +
         "&date=" + ymdFor(usageDay) + "&exe=" + encodeURIComponent(exe))
       .then(function (d) {
         var panel = document.createElement("div");
@@ -628,7 +732,7 @@ input:focus{border-color:var(--brand)}
       var ymd = "" + date.getFullYear() +
         ("0" + (date.getMonth() + 1)).slice(-2) +
         ("0" + date.getDate()).slice(-2);
-      return api("/api/usage?device=" + encodeURIComponent(usageDevice) + "&date=" + ymd);
+      return api("/api/usage?device=" + encodeURIComponent(deviceParam()) + "&date=" + ymd);
     }).then(function (u) {
       renderUsage(u);
       var btns = document.querySelectorAll("[data-day]");
@@ -642,7 +746,7 @@ input:focus{border-color:var(--brand)}
 
   function loadSiteReport() {
     if (!token) { return Promise.resolve(); }
-    return api("/api/site-report?device=" + encodeURIComponent(usageDevice) +
+    return api("/api/site-report?device=" + encodeURIComponent(deviceParam()) +
         "&date=" + ymdFor(usageDay) + "&range=" + siteReportRange)
       .then(function (d) { renderSiteReport(d); })
       .catch(function () { });
@@ -853,7 +957,8 @@ input:focus{border-color:var(--brand)}
     if (!token) { return Promise.resolve(); }
     return Promise.all([
       api("/api/status"),
-      api("/api/requests")
+      api("/api/requests"),
+      loadFleet()
     ]).then(function (results) {
       renderStatus(results[0].status || results[0]);
       renderRequests(results[1].items);
@@ -891,7 +996,31 @@ input:focus{border-color:var(--brand)}
 
   document.getElementById("usageRefreshBtn").addEventListener("click", function () {
     toast("正在刷新…");
+    loadFleet();
     loadUsage();
+  });
+
+  document.getElementById("joinCodeBtn").addEventListener("click", function () {
+    api("/api/fleet/join-code", { method: "POST", body: {} }).then(function (d) {
+      var box = document.getElementById("fleetJoin");
+      box.textContent = "";
+      var wrap = document.createElement("div");
+      wrap.className = "join-box";
+      var t = document.createElement("div");
+      t.textContent = "在子机填写主机地址与下方配对码（30 分钟内有效，仅显示这一次）：";
+      var code = document.createElement("div");
+      code.className = "join-code";
+      code.textContent = d.code || "";
+      var exp = document.createElement("div");
+      exp.className = "fleet-sub";
+      exp.textContent = "到期时间：" + (d.expiresAt || "");
+      wrap.appendChild(t);
+      wrap.appendChild(code);
+      wrap.appendChild(exp);
+      box.appendChild(wrap);
+    }).catch(function (err) {
+      toast(err.message || "生成配对码失败", true);
+    });
   });
 
   var dayBtns = document.querySelectorAll("[data-day]");
@@ -1029,11 +1158,11 @@ function Send-Html {
 }
 
 function Read-JsonBody {
-    param($Context)
+    param($Context, [int]$MaxBytes = 4096)
     $reader = New-Object System.IO.StreamReader($Context.Request.InputStream, [Text.Encoding]::UTF8)
     $raw = $reader.ReadToEnd()
     $reader.Dispose()
-    if ($raw.Length -gt 4096) { throw '请求内容过大' }
+    if ($raw.Length -gt $MaxBytes) { throw '请求内容过大' }
     if ([string]::IsNullOrWhiteSpace($raw)) { return [pscustomobject]@{} }
     return ($raw | ConvertFrom-Json)
 }
@@ -1104,6 +1233,121 @@ function Get-RequestById {
     }
 }
 
+# ---- 多设备上报通道：设备令牌防爆破（与面板令牌锁定表分开，互不影响） ----
+$script:fleetAuthFailures = @{}
+
+function Test-FleetLockedOut {
+    param([string]$Ip)
+    $entry = $script:fleetAuthFailures[$Ip]
+    if (-not $entry) { return $false }
+    if ($entry.lockedUntil -and (Get-Date) -lt $entry.lockedUntil) { return $true }
+    return $false
+}
+
+function Register-FleetAuthFailure {
+    param([string]$Ip)
+    $now = Get-Date
+    $entry = $script:fleetAuthFailures[$Ip]
+    if (-not $entry -or ($now - $entry.windowStart).TotalMinutes -gt 10) {
+        $entry = @{ count = 0; windowStart = $now; lockedUntil = $null }
+    }
+    $entry.count++
+    if ($entry.count -ge 8) {
+        $entry.lockedUntil = $now.AddMinutes(10)
+        $entry.count = 0
+        $entry.windowStart = $now
+        Write-PanelLog ('IP ' + $Ip + ' 多设备上报鉴权连续失败，锁定 10 分钟')
+    }
+    $script:fleetAuthFailures[$Ip] = $entry
+    if ($script:fleetAuthFailures.Count -gt 200) {
+        foreach ($k in @($script:fleetAuthFailures.Keys | Where-Object {
+                    ($now - $script:fleetAuthFailures[$_].windowStart).TotalHours -gt 1 })) {
+            $script:fleetAuthFailures.Remove($k)
+        }
+    }
+}
+
+function Invoke-FleetApi {
+    param($Context, [string]$Path, [string]$Method)
+    $request = $Context.Request
+    $ip = Get-ClientIp $request
+    if (Test-FleetLockedOut $ip) {
+        Send-Json $Context 429 ([ordered]@{ ok = $false; error = '失败次数过多，请稍后再试' })
+        return
+    }
+    if ($Method -ne 'POST') {
+        Send-Json $Context 405 ([ordered]@{ ok = $false; error = '请使用 POST' })
+        return
+    }
+
+    if ($Path -eq '/api/fleet/register') {
+        $body = $null
+        try { $body = Read-JsonBody $Context -MaxBytes 32768 } catch { $body = $null }
+        if (-not $body) {
+            Send-Json $Context 400 ([ordered]@{ ok = $false; error = '请求格式错误' })
+            return
+        }
+        try {
+            $result = Register-GuardFleetDevice -JoinCode ([string]$body.joinCode) `
+                -DeviceId ([string]$body.deviceId) -Name ([string]$body.name) -Version ([int]$body.version)
+            Write-GuardAudit 'fleet-register' ('device=' + [string]$body.deviceId) $true
+            Send-Json $Context 200 ([ordered]@{
+                ok       = $true
+                token    = [string]$result.token
+                deviceId = [string]$result.deviceId
+                name     = [string]$result.name
+            })
+        } catch {
+            Register-FleetAuthFailure $ip
+            Write-GuardAudit 'fleet-register' ('ip=' + $ip) $false
+            Send-Json $Context 403 ([ordered]@{ ok = $false; error = '配对码无效或已过期' })
+        }
+        return
+    }
+
+    # /api/fleet/report
+    $deviceId = [string]$request.Headers['X-PG-Device']
+    $deviceToken = [string]$request.Headers['X-PG-Device-Token']
+    $device = Test-GuardFleetDeviceToken -DeviceId $deviceId -Token $deviceToken
+    if (-not $device) {
+        Register-FleetAuthFailure $ip
+        Write-GuardAudit 'fleet-report' ('ip=' + $ip) $false
+        Send-Json $Context 401 ([ordered]@{ ok = $false; error = '设备令牌无效' })
+        return
+    }
+    $body = $null
+    try { $body = Read-JsonBody $Context -MaxBytes 1048576 } catch { $body = $null }
+    if (-not $body) {
+        Send-Json $Context 400 ([ordered]@{ ok = $false; error = '请求格式错误' })
+        return
+    }
+    $version = 0
+    try { $version = [int]$body.device.version } catch { $version = 0 }
+    Update-GuardFleetDeviceSeen -DeviceId $deviceId -Version $version
+    $accepted = Add-GuardFleetSegments -DeviceId $deviceId -DeviceName ([string]$device.name) `
+        -Usage $body.usage -Web $body.web
+    Sync-GuardFleetRequests -DeviceId $deviceId -DeviceName ([string]$device.name) -Requests $body.requests
+    Confirm-GuardFleetCommands -DeviceId $deviceId -AckIds $body.ack
+
+    # 返回游标：子机本地最大结束时刻（无新数据时原样返回）
+    $cursor = [string]$body.cursor
+    foreach ($rec in @($body.usage) + @($body.web)) {
+        if (-not $rec) { continue }
+        $e = [string]$rec.e
+        if ((Test-GuardFleetTimestamp $e) -and (-not $cursor -or [string]::CompareOrdinal($e, $cursor) -gt 0)) {
+            $cursor = $e
+        }
+    }
+    $commands = @(Get-GuardFleetCommands -DeviceId $deviceId)
+    Send-Json $Context 200 ([ordered]@{
+        ok         = $true
+        serverTime = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        cursor     = $cursor
+        accepted   = $accepted
+        commands   = @($commands)
+    })
+}
+
 $listener = New-Object System.Net.HttpListener
 $listenUrls = @("http://127.0.0.1:$port/")
 # 除回环外再监听本机局域网 IPv4：公网入口依赖 Cloudflare 隧道，而 Cloudflare 分配的边缘
@@ -1167,6 +1411,12 @@ try {
                 continue
             }
 
+            # 多设备上报通道使用每设备令牌，走独立鉴权，不复用面板令牌
+            if ($path -eq '/api/fleet/register' -or $path -eq '/api/fleet/report') {
+                Invoke-FleetApi -Context $context -Path $path -Method $method
+                continue
+            }
+
             $clientIp = Get-ClientIp $request
             if (Test-AuthLockedOut $clientIp) {
                 Write-GuardAudit 'auth' ('ip=' + $clientIp + ';locked') $false
@@ -1185,6 +1435,11 @@ try {
                     $snapshot = Get-GuardStatusSnapshot
                     $snapshot['serverTime'] = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
                     $snapshot['panelUptimeSeconds'] = [int]((Get-Date) - $startedAt).TotalSeconds
+                    # 待审批 = 本机申请 + 其他设备待审申请
+                    try {
+                        $snapshot['pendingRequests'] = [int]$snapshot['pendingRequests'] +
+                            @(Get-GuardFleetRequests -PendingOnly).Count
+                    } catch { }
                     $age = Get-GuardHeartbeatAgeSeconds
                     if ($null -ne $age -and $age -gt 180) {
                         Send-BarkAlertOnce -Key 'watchdog-stale' `
@@ -1197,15 +1452,21 @@ try {
                 }
                 '/api/requests' {
                     $items = @()
+                    $localName = Get-GuardDeviceName
                     foreach ($requestItem in @(Get-GuardRequests)) {
                         $items += [ordered]@{
-                            id = [IO.Path]::GetFileName([string]$requestItem.File)
-                            time = [string]$requestItem.time
-                            kind = [string]$requestItem.kind
+                            id     = [IO.Path]::GetFileName([string]$requestItem.File)
+                            device = $localName
+                            time   = [string]$requestItem.time
+                            kind   = [string]$requestItem.kind
                             target = [string]$requestItem.target
                             minutes = [int]$requestItem.minutes
                             reason = [string]$requestItem.reason
+                            status = 'pending'
                         }
+                    }
+                    foreach ($fleetItem in @(Get-GuardFleetRequests)) {
+                        $items += $fleetItem
                     }
                     Send-Json $context 200 ([ordered]@{ ok = $true; items = @($items) })
                     break
@@ -1269,7 +1530,32 @@ try {
                         break
                     }
                     $body = Read-JsonBody $context
-                    $item = Get-RequestById -Id ([string]$body.id)
+                    $requestId = [string]$body.id
+                    # 其他设备的申请：写入指令队列，等该设备下次上报时执行
+                    if ($requestId -match '^fleet\|([a-f0-9]{16,40})\|(req_[A-Za-z0-9_.-]+\.json)$') {
+                        $fleetDeviceId = $Matches[1]
+                        $fleetFile = $Matches[2]
+                        $fleetReq = Get-GuardFleetRequestById -DeviceId $fleetDeviceId -FileName $fleetFile
+                        if (-not $fleetReq) {
+                            Send-Json $context 404 ([ordered]@{ ok = $false; error = '申请不存在或已处理' })
+                            break
+                        }
+                        if ([string]$fleetReq.status -eq 'queued') {
+                            Send-Json $context 409 ([ordered]@{ ok = $false; error = '该申请已下发，等待设备上线' })
+                            break
+                        }
+                        $minutes = [int]$fleetReq.minutes
+                        if ($minutes -lt 1 -or $minutes -gt 240) { $minutes = 30 }
+                        Invoke-GuardFleetEnqueueCommand -DeviceId $fleetDeviceId -RequestFile $fleetFile `
+                            -Action 'approve' -Minutes $minutes | Out-Null
+                        Write-GuardAudit 'approve' ('device=' + $fleetDeviceId + ';minutes=' + $minutes) $true
+                        Send-Json $context 200 ([ordered]@{
+                            ok      = $true
+                            message = ('已下发批准指令（放行 {0} 分钟），设备上线后自动生效' -f $minutes)
+                        })
+                        break
+                    }
+                    $item = Get-RequestById -Id $requestId
                     if (-not $item) {
                         Send-Json $context 404 ([ordered]@{ ok = $false; error = '申请不存在或已处理' })
                         break
@@ -1292,7 +1578,26 @@ try {
                         break
                     }
                     $body = Read-JsonBody $context
-                    $item = Get-RequestById -Id ([string]$body.id)
+                    $requestId = [string]$body.id
+                    if ($requestId -match '^fleet\|([a-f0-9]{16,40})\|(req_[A-Za-z0-9_.-]+\.json)$') {
+                        $fleetDeviceId = $Matches[1]
+                        $fleetFile = $Matches[2]
+                        $fleetReq = Get-GuardFleetRequestById -DeviceId $fleetDeviceId -FileName $fleetFile
+                        if (-not $fleetReq) {
+                            Send-Json $context 404 ([ordered]@{ ok = $false; error = '申请不存在或已处理' })
+                            break
+                        }
+                        if ([string]$fleetReq.status -eq 'queued') {
+                            Send-Json $context 409 ([ordered]@{ ok = $false; error = '该申请已下发，等待设备上线' })
+                            break
+                        }
+                        Invoke-GuardFleetEnqueueCommand -DeviceId $fleetDeviceId -RequestFile $fleetFile `
+                            -Action 'deny' -Minutes 0 | Out-Null
+                        Write-GuardAudit 'deny' ('device=' + $fleetDeviceId) $true
+                        Send-Json $context 200 ([ordered]@{ ok = $true; message = '已下发拒绝指令，设备上线后自动生效' })
+                        break
+                    }
+                    $item = Get-RequestById -Id $requestId
                     if (-not $item) {
                         Send-Json $context 404 ([ordered]@{ ok = $false; error = '申请不存在或已处理' })
                         break
@@ -1303,7 +1608,42 @@ try {
                     break
                 }
                 '/api/devices' {
-                    Send-Json $context 200 ([ordered]@{ ok = $true; items = @(Get-GuardUsageDevices) })
+                    Send-Json $context 200 ([ordered]@{ ok = $true; items = @(Get-GuardDeviceList) })
+                    break
+                }
+                '/api/fleet/join-code' {
+                    if ($method -ne 'POST') {
+                        Send-Json $context 405 ([ordered]@{ ok = $false; error = '请使用 POST' })
+                        break
+                    }
+                    $result = New-GuardFleetJoinCode
+                    Write-PanelLog '已生成一次性设备配对码'
+                    Send-Json $context 200 ([ordered]@{
+                        ok        = $true
+                        code      = [string]$result.code
+                        expiresAt = [string]$result.expiresAt
+                        message   = '配对码仅显示这一次，30 分钟内有效'
+                    })
+                    break
+                }
+                '/api/fleet/devices' {
+                    Send-Json $context 200 ([ordered]@{ ok = $true; items = @(Get-GuardFleetDeviceList) })
+                    break
+                }
+                '/api/fleet/devices/remove' {
+                    if ($method -ne 'POST') {
+                        Send-Json $context 405 ([ordered]@{ ok = $false; error = '请使用 POST' })
+                        break
+                    }
+                    $body = Read-JsonBody $context
+                    $removed = $false
+                    try { $removed = Remove-GuardFleetDevice -DeviceId ([string]$body.id) } catch { $removed = $false }
+                    if (-not $removed) {
+                        Send-Json $context 404 ([ordered]@{ ok = $false; error = '设备不存在' })
+                        break
+                    }
+                    Write-GuardAudit 'fleet-remove' ('device=' + [string]$body.id) $true
+                    Send-Json $context 200 ([ordered]@{ ok = $true; message = '已移除设备，需重新配对才能上报' })
                     break
                 }
                 '/api/usage' {

@@ -39,6 +39,14 @@ function Initialize-GuardPaths {
     $script:TunnelScript = Join-Path $script:GuardRoot 'cloudflared-panel.ps1'
     $script:TunnelExe    = Join-Path $script:GuardRoot 'cloudflared.exe'
     $script:TunnelUrlPath = Join-Path $script:GuardRoot 'tunnel-url.txt'
+    # 多设备汇总：主机保存设备清单/待审批/指令队列/去重索引；子机保存上报游标
+    $script:FleetDir        = Join-Path $script:GuardRoot 'fleet'
+    $script:FleetDevicesPath = Join-Path $script:FleetDir 'devices.json'
+    $script:FleetJoinPath   = Join-Path $script:FleetDir 'joincode.json'
+    $script:FleetRequestsDir = Join-Path $script:FleetDir 'requests'
+    $script:FleetOutboxDir  = Join-Path $script:FleetDir 'outbox'
+    $script:FleetIngestDir  = Join-Path $script:FleetDir 'ingest'
+    $script:FleetStatePath  = Join-Path $script:GuardRoot 'fleet-state.json'
     # IFEO Debugger 命令行（路径均无空格，无需内嵌引号，避免 reg.exe 转义问题）
     $script:StubPath    = '{0} -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File {1}' -f `
         (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'), $script:StubScript
@@ -192,6 +200,13 @@ function Get-DefaultConfig {
         remotePort          = 8787
         remoteToken         = ''
         barkKey             = ''
+        # 多设备汇总（留空 = 单机模式，行为与旧版完全一致）
+        fleetHost           = ''
+        fleetJoinCode       = ''
+        fleetDeviceId       = ''
+        fleetDeviceToken    = ''
+        fleetMemberName     = ''
+        fleetStatus         = ''
     }
 }
 
@@ -304,7 +319,8 @@ function Update-GuardConfigDefaults {
     if (-not $Config) { $Config = Get-GuardConfig }
     if (-not $Config) { return $null }
     $defaults = Get-DefaultConfig
-    foreach ($name in @('remoteEnabled', 'remotePort', 'remoteToken', 'barkKey', 'deviceName')) {
+    foreach ($name in @('remoteEnabled', 'remotePort', 'remoteToken', 'barkKey', 'deviceName',
+            'fleetHost', 'fleetJoinCode', 'fleetDeviceId', 'fleetDeviceToken', 'fleetMemberName', 'fleetStatus')) {
         if (-not $Config.PSObject.Properties[$name]) {
             $Config | Add-Member -NotePropertyName $name -NotePropertyValue $defaults.$name -Force
         }
@@ -1357,6 +1373,15 @@ function Remove-GuardOldUsage {
             }
         }
     }
+    # 多设备：待审批与未下发指令同样按 30 天清理（已处理项通常即时删除）
+    foreach ($root in @($script:FleetRequestsDir, $script:FleetOutboxDir)) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($file in @(Get-ChildItem -LiteralPath $root -Recurse -File -Filter '*.json' -ErrorAction SilentlyContinue)) {
+            if ($file.LastWriteTime -lt $limit) {
+                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 function Get-GuardUsageDevices {
@@ -2171,6 +2196,973 @@ function Get-GuardSiteReport {
         hourly           = @($hourly)
         trend            = @($trend)
         alerts           = @($alerts)
+    }
+}
+
+# =====================================================================
+# 多设备汇总（Fleet）
+# ---------------------------------------------------------------------
+# 主机（跑面板的机器）：
+#   - 生成一次性配对码；子机凭码注册，换取每设备令牌
+#   - 接收子机的程序/网站用量段、待审批申请、在线心跳
+#   - 把子机用量段并入本机 usage/web 日文件（保留原记录形状，d=注册设备名），
+#     现有设备维度、程序、网站分析函数无需改动即可支持“全部设备 / 单台设备”
+#   - 审批决定写入 outbox 指令队列，子机下次上报时取走执行，成功后才 ACK
+# 子机（配置了 fleetHost 的机器）：
+#   - 本机 watchdog 每分钟调用 Invoke-GuardFleetSync
+#   - 本地 jsonl 即缓存，只推进游标；断网/主机离线不丢数据
+# 鉴权：配对码与设备令牌在主机侧只保存哈希；令牌只在注册响应里回显一次。
+# =====================================================================
+
+function Get-GuardUtf8NoBom {
+    return (New-Object Text.UTF8Encoding($false))
+}
+
+function Write-GuardJsonFile {
+    param([string]$Path, $Object)
+    $dir = Split-Path -Parent $Path
+    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $json = $Object | ConvertTo-Json -Depth 8
+    $tmp = $Path + '.tmp'
+    [IO.File]::WriteAllText($tmp, $json, (Get-GuardUtf8NoBom))
+    Move-Item -LiteralPath $tmp -Destination $Path -Force
+}
+
+function Get-GuardSha1Hex {
+    param([string]$Text)
+    $sha = [Security.Cryptography.SHA1]::Create()
+    try {
+        $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$Text))
+        return (-join ($bytes | ForEach-Object { $_.ToString('x2') }))
+    } finally { $sha.Dispose() }
+}
+
+function Get-GuardSha256Hex {
+    param([string]$Text)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$Text))
+        return (-join ($bytes | ForEach-Object { $_.ToString('x2') }))
+    } finally { $sha.Dispose() }
+}
+
+function New-GuardFleetSecret {
+    param([int]$Bytes = 32)
+    $buf = [byte[]]::new($Bytes)
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($buf)
+    return (-join ($buf | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Test-GuardFleetDeviceId {
+    param([string]$DeviceId)
+    return ([string]$DeviceId -match '^[a-f0-9]{16,40}$')
+}
+
+function Initialize-GuardFleetDirs {
+    foreach ($dir in @($script:FleetDir, $script:FleetRequestsDir, $script:FleetOutboxDir, $script:FleetIngestDir)) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+    }
+}
+
+function Read-GuardFleetDevices {
+    $data = $null
+    if (Test-Path -LiteralPath $script:FleetDevicesPath) {
+        try {
+            $raw = [IO.File]::ReadAllText($script:FleetDevicesPath, [Text.Encoding]::UTF8)
+            if (-not [string]::IsNullOrWhiteSpace($raw)) { $data = $raw | ConvertFrom-Json }
+        } catch { $data = $null }
+    }
+    if (-not $data) {
+        return [pscustomobject]@{ version = 1; devices = @() }
+    }
+    if (-not $data.PSObject.Properties['devices']) {
+        $data | Add-Member -NotePropertyName 'devices' -NotePropertyValue @() -Force
+    }
+    return $data
+}
+
+function Get-GuardFleetDeviceList {
+    param([switch]$IncludeRemoved)
+    $data = Read-GuardFleetDevices
+    $items = @()
+    $now = Get-Date
+    foreach ($dev in @($data.devices)) {
+        if (-not $dev) { continue }
+        $status = [string]$dev.status
+        if (-not $IncludeRemoved -and $status -eq 'removed') { continue }
+        $online = $false
+        $lastSeen = [string]$dev.lastSeen
+        if ($lastSeen) {
+            try {
+                $seenAt = [datetime]::ParseExact($lastSeen, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+                $online = (($now - $seenAt).TotalSeconds -lt 180)
+            } catch { }
+        }
+        $items += [ordered]@{
+            id       = [string]$dev.id
+            name     = [string]$dev.name
+            status   = $status
+            online   = $online
+            lastSeen = $lastSeen
+            joinedAt = [string]$dev.joinedAt
+            version  = [int]$dev.version
+        }
+    }
+    return @($items | Sort-Object -Property name)
+}
+
+function Get-GuardFleetDeviceById {
+    param([string]$DeviceId)
+    if (-not (Test-GuardFleetDeviceId $DeviceId)) { return $null }
+    $data = Read-GuardFleetDevices
+    foreach ($dev in @($data.devices)) {
+        if ($dev -and [string]$dev.id -eq $DeviceId) { return $dev }
+    }
+    return $null
+}
+
+function Test-GuardFleetDeviceToken {
+    param([string]$DeviceId, [string]$Token)
+    if (-not (Test-GuardFleetDeviceId $DeviceId) -or [string]::IsNullOrWhiteSpace($Token)) { return $null }
+    $dev = Get-GuardFleetDeviceById -DeviceId $DeviceId
+    if (-not $dev) { return $null }
+    if ([string]$dev.status -ne 'active') { return $null }
+    $expected = [string]$dev.tokenHash
+    if ([string]::IsNullOrWhiteSpace($expected)) { return $null }
+    $actual = Get-GuardSha256Hex ([string]$Token)
+    if (Get-FixedTimeHashEqual -A $actual -B $expected) { return $dev }
+    return $null
+}
+
+function Update-GuardFleetDeviceSeen {
+    param([string]$DeviceId, [int]$Version = 0)
+    $data = Read-GuardFleetDevices
+    $changed = $false
+    foreach ($dev in @($data.devices)) {
+        if ($dev -and [string]$dev.id -eq $DeviceId) {
+            $dev.lastSeen = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            if ($Version -gt 0) { $dev.version = $Version }
+            $changed = $true
+        }
+    }
+    if ($changed) { Write-GuardJsonFile -Path $script:FleetDevicesPath -Object $data }
+}
+
+function Get-GuardFleetUniqueName {
+    param([string]$DeviceId, [string]$Name)
+    $candidate = ([string]$Name).Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) { $candidate = 'Windows' }
+    $candidate = ($candidate -replace '[\x00-\x1f]', '').Trim()
+    if ($candidate.Length -gt 40) { $candidate = $candidate.Substring(0, 40) }
+    $hostName = Get-GuardDeviceName
+    $data = Read-GuardFleetDevices
+    $used = @{}
+    foreach ($dev in @($data.devices)) {
+        if ($dev -and [string]$dev.id -ne $DeviceId -and [string]$dev.status -ne 'removed') {
+            $used[([string]$dev.name).ToLowerInvariant()] = $true
+        }
+    }
+    $used[$hostName.ToLowerInvariant()] = $true
+    if (-not $used.ContainsKey($candidate.ToLowerInvariant())) { return $candidate }
+    $suffix = $DeviceId.Substring(0, [math]::Min(4, $DeviceId.Length))
+    $base = $candidate + '-' + $suffix
+    $name2 = $base
+    $n = 2
+    while ($used.ContainsKey($name2.ToLowerInvariant())) {
+        $name2 = $base + '-' + $n
+        $n++
+    }
+    return $name2
+}
+
+function New-GuardFleetJoinCode {
+    # 返回明文仅一次；主机只保存盐 + 哈希
+    $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    $chars = @()
+    $buf = [byte[]]::new(8)
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($buf)
+    foreach ($b in $buf) { $chars += $alphabet[$b % $alphabet.Length] }
+    $raw = -join $chars
+    $code = $raw.Substring(0, 4) + '-' + $raw.Substring(4, 4)
+    $saltBytes = [byte[]]::new(16)
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($saltBytes)
+    $salt = [Convert]::ToBase64String($saltBytes)
+    $norm = ($raw -replace '[^A-Za-z0-9]', '').ToUpperInvariant()
+    $obj = [ordered]@{
+        salt      = $salt
+        hash      = (Get-GuardSha256Hex ($salt + '|' + $norm))
+        expiresAt = (Get-Date).AddMinutes(30).ToString('yyyy-MM-dd HH:mm:ss')
+        used      = $false
+        createdAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    }
+    Initialize-GuardFleetDirs
+    Write-GuardJsonFile -Path $script:FleetJoinPath -Object $obj
+    return @{ code = $code; expiresAt = $obj.expiresAt }
+}
+
+function Register-GuardFleetDevice {
+    param(
+        [string]$JoinCode,
+        [string]$DeviceId,
+        [string]$Name,
+        [int]$Version = 0
+    )
+    if (-not (Test-GuardFleetDeviceId $DeviceId)) { throw '设备标识无效' }
+    $norm = ([string]$JoinCode -replace '[^A-Za-z0-9]', '').ToUpperInvariant()
+    if ([string]::IsNullOrWhiteSpace($norm)) { throw '缺少配对码' }
+    if (-not (Test-Path -LiteralPath $script:FleetJoinPath)) { throw '主机尚未生成配对码' }
+    $join = $null
+    try { $join = ([IO.File]::ReadAllText($script:FleetJoinPath, [Text.Encoding]::UTF8)) | ConvertFrom-Json } catch { }
+    if (-not $join) { throw '配对码不可用' }
+    if ([bool]$join.used) { throw '配对码已使用' }
+    try {
+        $expires = [datetime]::ParseExact([string]$join.expiresAt, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+        if ((Get-Date) -gt $expires) { throw '配对码已过期' }
+    } catch { throw '配对码已过期' }
+    $expect = Get-GuardSha256Hex ([string]$join.salt + '|' + $norm)
+    if (-not (Get-FixedTimeHashEqual -A $expect -B ([string]$join.hash))) { throw '配对码不正确' }
+
+    $token = New-GuardFleetSecret -Bytes 32
+    $data = Read-GuardFleetDevices
+    $nowText = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $display = Get-GuardFleetUniqueName -DeviceId $DeviceId -Name $Name
+    $found = $false
+    foreach ($dev in @($data.devices)) {
+        if ($dev -and [string]$dev.id -eq $DeviceId) {
+            $dev.name = $display
+            $dev.tokenHash = (Get-GuardSha256Hex $token)
+            $dev.status = 'active'
+            $dev.lastSeen = $nowText
+            $dev.version = $Version
+            if (-not $dev.joinedAt) { $dev.joinedAt = $nowText }
+            $found = $true
+        }
+    }
+    if (-not $found) {
+        $entry = [ordered]@{
+            id        = $DeviceId
+            name      = $display
+            tokenHash = (Get-GuardSha256Hex $token)
+            joinedAt  = $nowText
+            lastSeen  = $nowText
+            version   = $Version
+            status    = 'active'
+        }
+        $data.devices = @(@($data.devices) + $entry)
+    }
+    Initialize-GuardFleetDirs
+    Write-GuardJsonFile -Path $script:FleetDevicesPath -Object $data
+
+    # 配对码一次性：立即作废
+    $join.used = $true
+    $join | Add-Member -NotePropertyName 'usedAt' -NotePropertyValue $nowText -Force
+    Write-GuardJsonFile -Path $script:FleetJoinPath -Object $join
+
+    return @{ token = $token; name = $display; deviceId = $DeviceId }
+}
+
+function Remove-GuardFleetDevice {
+    param([string]$DeviceId)
+    if (-not (Test-GuardFleetDeviceId $DeviceId)) { throw '设备标识无效' }
+    $data = Read-GuardFleetDevices
+    $found = $false
+    foreach ($dev in @($data.devices)) {
+        if ($dev -and [string]$dev.id -eq $DeviceId) {
+            $dev.status = 'removed'
+            $dev.tokenHash = ''
+            $dev | Add-Member -NotePropertyName 'removedAt' -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Force
+            $found = $true
+        }
+    }
+    if (-not $found) { return $false }
+    Write-GuardJsonFile -Path $script:FleetDevicesPath -Object $data
+    # 撤销后清掉该设备遗留的待审批与未下发指令（历史用量保留，按 30 天自然过期）
+    foreach ($dir in @((Join-Path $script:FleetRequestsDir $DeviceId), (Join-Path $script:FleetOutboxDir $DeviceId))) {
+        if (Test-Path -LiteralPath $dir) {
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $true
+}
+
+function New-GuardFleetRecordId {
+    param(
+        [string]$Kind,
+        [string]$DeviceId,
+        [string]$Exe,
+        [string]$Start,
+        [string]$End,
+        [string]$Extra = ''
+    )
+    return (Get-GuardSha1Hex ($Kind + '|' + $DeviceId + '|' + $Exe + '|' + $Start + '|' + $End + '|' + $Extra))
+}
+
+function Test-GuardFleetTimestamp {
+    param([string]$Value)
+    return ([string]$Value -match '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$')
+}
+
+# 把子机上报的用量段并入本机日文件；按确定性 id 幂等
+function Add-GuardFleetSegments {
+    param(
+        [string]$DeviceId,
+        [string]$DeviceName,
+        $Usage,
+        $Web
+    )
+    Initialize-GuardFleetDirs
+    $ledgerPath = Join-Path $script:FleetIngestDir ($DeviceId + '.ids')
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+    if (Test-Path -LiteralPath $ledgerPath) {
+        try {
+            foreach ($line in @([IO.File]::ReadAllLines($ledgerPath, [Text.Encoding]::UTF8))) {
+                if ($line) { [void]$seen.Add($line.Trim()) }
+            }
+        } catch { }
+    }
+    $newIds = New-Object 'System.Collections.Generic.List[string]'
+    $accepted = 0
+    $usageAppends = @{}
+    $webAppends = @{}
+
+    foreach ($rec in @($Usage)) {
+        if (-not $rec) { continue }
+        $s = [string]$rec.s
+        $e = [string]$rec.e
+        if (-not (Test-GuardFleetTimestamp $s) -or -not (Test-GuardFleetTimestamp $e)) { continue }
+        $sec = 0
+        try { $sec = [int]$rec.sec } catch { $sec = 0 }
+        if ($sec -lt 30) {
+            try {
+                $sec = [int](([datetime]::ParseExact($e, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)) -
+                    ([datetime]::ParseExact($s, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))).TotalSeconds
+            } catch { continue }
+        }
+        if ($sec -lt 30 -or $sec -gt 86400) { continue }
+        $exe = ([string]$rec.exe).Trim()
+        if ([string]::IsNullOrWhiteSpace($exe)) { continue }
+        $id = [string]$rec.id
+        if ($id -notmatch '^[a-f0-9]{40}$') {
+            $id = New-GuardFleetRecordId -Kind 'usage' -DeviceId $DeviceId -Exe $exe -Start $s -End $e
+        }
+        if (-not $seen.Add($id)) { continue }
+        $newIds.Add($id) | Out-Null
+        $name = [string]$rec.name
+        $record = [ordered]@{
+            d    = $DeviceName
+            exe  = $exe
+            name = $name
+            s    = $s
+            e    = $e
+            sec  = $sec
+        }
+        $day = $s.Substring(0, 4) + $s.Substring(5, 2) + $s.Substring(8, 2)
+        if (-not $usageAppends.ContainsKey($day)) { $usageAppends[$day] = New-Object 'System.Collections.Generic.List[string]' }
+        $usageAppends[$day].Add(($record | ConvertTo-Json -Compress)) | Out-Null
+        $accepted++
+    }
+
+    foreach ($rec in @($Web)) {
+        if (-not $rec) { continue }
+        $s = [string]$rec.s
+        $e = [string]$rec.e
+        if (-not (Test-GuardFleetTimestamp $s) -or -not (Test-GuardFleetTimestamp $e)) { continue }
+        $sec = 0
+        try { $sec = [int]$rec.sec } catch { $sec = 0 }
+        if ($sec -lt 30) {
+            try {
+                $sec = [int](([datetime]::ParseExact($e, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)) -
+                    ([datetime]::ParseExact($s, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture))).TotalSeconds
+            } catch { continue }
+        }
+        if ($sec -lt 30 -or $sec -gt 86400) { continue }
+        $exe = ([string]$rec.exe).Trim()
+        if ([string]::IsNullOrWhiteSpace($exe)) { continue }
+        $hostName = [string]$rec.host
+        $id = [string]$rec.id
+        if ($id -notmatch '^[a-f0-9]{40}$') {
+            $id = New-GuardFleetRecordId -Kind 'web' -DeviceId $DeviceId -Exe $exe -Start $s -End $e -Extra $hostName
+        }
+        if (-not $seen.Add($id)) { continue }
+        $newIds.Add($id) | Out-Null
+        $record = [ordered]@{
+            d    = $DeviceName
+            exe  = $exe
+            host = $hostName
+            s    = $s
+            e    = $e
+            sec  = $sec
+        }
+        $basis = [string]$rec.basis
+        $note = [string]$rec.note
+        if (-not [string]::IsNullOrWhiteSpace($basis)) { $record['basis'] = $basis }
+        if (-not [string]::IsNullOrWhiteSpace($note)) { $record['note'] = $note }
+        if ($rec.PSObject.Properties['blocked'] -and [bool]$rec.blocked) { $record['blocked'] = $true }
+        $day = $s.Substring(0, 4) + $s.Substring(5, 2) + $s.Substring(8, 2)
+        if (-not $webAppends.ContainsKey($day)) { $webAppends[$day] = New-Object 'System.Collections.Generic.List[string]' }
+        $webAppends[$day].Add(($record | ConvertTo-Json -Compress)) | Out-Null
+        $accepted++
+    }
+
+    foreach ($day in $usageAppends.Keys) {
+        try {
+            $file = Join-Path $script:UsageDir ('usage_' + $day + '.jsonl')
+            [IO.File]::AppendAllText($file, (($usageAppends[$day] -join "`r`n") + "`r`n"), (Get-GuardUtf8NoBom))
+        } catch { }
+    }
+    foreach ($day in $webAppends.Keys) {
+        try {
+            $file = Join-Path $script:UsageDir ('web_' + $day + '.jsonl')
+            [IO.File]::AppendAllText($file, (($webAppends[$day] -join "`r`n") + "`r`n"), (Get-GuardUtf8NoBom))
+        } catch { }
+    }
+
+    if ($newIds.Count -gt 0) {
+        try {
+            $text = @($newIds) -join "`r`n"
+            [IO.File]::AppendAllText($ledgerPath, $text + "`r`n", (Get-GuardUtf8NoBom))
+        } catch { }
+        # 索引过大时保留最近一段，防止无限增长
+        try {
+            $count = @([IO.File]::ReadAllLines($ledgerPath, [Text.Encoding]::UTF8)).Count
+            if ($count -gt 200000) {
+                $lines = @([IO.File]::ReadAllLines($ledgerPath, [Text.Encoding]::UTF8))
+                [IO.File]::WriteAllLines($ledgerPath, @($lines[($lines.Count - 100000)..($lines.Count - 1)]), (Get-GuardUtf8NoBom))
+            }
+        } catch { }
+    }
+    return $accepted
+}
+
+# 同步子机待审批申请到主机；子机侧已消失的 pending 项一并清掉
+function Sync-GuardFleetRequests {
+    param([string]$DeviceId, [string]$DeviceName, $Requests)
+    if (-not (Test-GuardFleetDeviceId $DeviceId)) { return }
+    $dir = Join-Path $script:FleetRequestsDir $DeviceId
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $received = @{}
+    foreach ($req in @($Requests)) {
+        if (-not $req) { continue }
+        $fileName = [string]$req.id
+        if ($fileName -notmatch '^req_[A-Za-z0-9_.-]+\.json$') { continue }
+        $received[$fileName] = $true
+        $path = Join-Path $dir $fileName
+        if (Test-Path -LiteralPath $path) {
+            try {
+                $existing = ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) | ConvertFrom-Json
+                if ([string]$existing.status -eq 'queued') { continue }
+            } catch { }
+        }
+        $obj = [ordered]@{
+            id         = $fileName
+            time       = [string]$req.time
+            kind       = [string]$req.kind
+            target     = [string]$req.target
+            minutes    = [int]$req.minutes
+            reason     = [string]$req.reason
+            deviceId   = $DeviceId
+            device     = $DeviceName
+            status     = 'pending'
+            receivedAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        }
+        Write-GuardJsonFile -Path $path -Object $obj
+    }
+    foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter 'req_*.json' -File -ErrorAction SilentlyContinue)) {
+        if ($received.ContainsKey($file.Name)) { continue }
+        try {
+            $existing = ([IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)) | ConvertFrom-Json
+            if ([string]$existing.status -ne 'queued') {
+                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            }
+        } catch {
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-GuardFleetRequests {
+    param([switch]$PendingOnly)
+    $items = @()
+    if (-not (Test-Path -LiteralPath $script:FleetRequestsDir)) { return @() }
+    $nameById = @{}
+    foreach ($dev in @((Read-GuardFleetDevices).devices)) {
+        if ($dev) { $nameById[[string]$dev.id] = [string]$dev.name }
+    }
+    foreach ($dir in @(Get-ChildItem -LiteralPath $script:FleetRequestsDir -Directory -ErrorAction SilentlyContinue)) {
+        $deviceId = $dir.Name
+        if (-not (Test-GuardFleetDeviceId $deviceId)) { continue }
+        foreach ($file in @(Get-ChildItem -LiteralPath $dir.FullName -Filter 'req_*.json' -File -ErrorAction SilentlyContinue)) {
+            try {
+                $obj = ([IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)) | ConvertFrom-Json
+                $status = [string]$obj.status
+                if ($PendingOnly -and $status -ne 'pending') { continue }
+                $deviceName = [string]$obj.device
+                if (-not $deviceName -and $nameById.ContainsKey($deviceId)) { $deviceName = $nameById[$deviceId] }
+                $items += [ordered]@{
+                    id       = ('fleet|' + $deviceId + '|' + $file.Name)
+                    deviceId = $deviceId
+                    device   = $deviceName
+                    time     = [string]$obj.time
+                    kind     = [string]$obj.kind
+                    target   = [string]$obj.target
+                    minutes  = [int]$obj.minutes
+                    reason   = [string]$obj.reason
+                    status   = $status
+                }
+            } catch { }
+        }
+    }
+    return @($items | Sort-Object -Property time)
+}
+
+function Get-GuardFleetRequestById {
+    param([string]$DeviceId, [string]$FileName)
+    if (-not (Test-GuardFleetDeviceId $DeviceId)) { return $null }
+    if ($FileName -notmatch '^req_[A-Za-z0-9_.-]+\.json$') { return $null }
+    $path = Join-Path (Join-Path $script:FleetRequestsDir $DeviceId) $FileName
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $obj = ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) | ConvertFrom-Json
+        $obj | Add-Member -NotePropertyName 'Path' -NotePropertyValue $path -Force
+        return $obj
+    } catch { return $null }
+}
+
+function Invoke-GuardFleetEnqueueCommand {
+    param(
+        [string]$DeviceId,
+        [string]$RequestFile,
+        [string]$Action,
+        [int]$Minutes = 0
+    )
+    if (-not (Test-GuardFleetDeviceId $DeviceId)) { throw '设备标识无效' }
+    if ($Action -ne 'approve' -and $Action -ne 'deny') { throw '指令类型无效' }
+    $dir = Join-Path $script:FleetOutboxDir $DeviceId
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $cmdId = 'cmd_' + (Get-Date -Format 'yyyyMMddHHmmss_fff') + '_' + ([Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $obj = [ordered]@{
+        id        = $cmdId
+        action    = $Action
+        requestId = [string]$RequestFile
+        minutes   = [int]$Minutes
+        createdAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        attempts  = 0
+    }
+    Write-GuardJsonFile -Path (Join-Path $dir ($cmdId + '.json')) -Object $obj
+    # 标记主机侧申请为“已下发”，面板显示等待设备上线
+    $reqPath = Join-Path (Join-Path $script:FleetRequestsDir $DeviceId) $RequestFile
+    if (Test-Path -LiteralPath $reqPath) {
+        try {
+            $req = ([IO.File]::ReadAllText($reqPath, [Text.Encoding]::UTF8)) | ConvertFrom-Json
+            $req | Add-Member -NotePropertyName 'status' -NotePropertyValue 'queued' -Force
+            $req | Add-Member -NotePropertyName 'queuedAt' -NotePropertyValue (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') -Force
+            Write-GuardJsonFile -Path $reqPath -Object $req
+        } catch { }
+    }
+    return $cmdId
+}
+
+function Get-GuardFleetCommands {
+    param([string]$DeviceId)
+    $items = @()
+    if (-not (Test-GuardFleetDeviceId $DeviceId)) { return @() }
+    $dir = Join-Path $script:FleetOutboxDir $DeviceId
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    foreach ($file in @(Get-ChildItem -LiteralPath $dir -Filter 'cmd_*.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $obj = ([IO.File]::ReadAllText($file.FullName, [Text.Encoding]::UTF8)) | ConvertFrom-Json
+            $items += [ordered]@{
+                id        = [string]$obj.id
+                action    = [string]$obj.action
+                requestId = [string]$obj.requestId
+                minutes   = [int]$obj.minutes
+                createdAt = [string]$obj.createdAt
+            }
+        } catch { }
+    }
+    return @($items | Sort-Object -Property createdAt)
+}
+
+function Confirm-GuardFleetCommands {
+    param([string]$DeviceId, $AckIds)
+    if (-not (Test-GuardFleetDeviceId $DeviceId)) { return }
+    $dir = Join-Path $script:FleetOutboxDir $DeviceId
+    foreach ($cmdId in @($AckIds)) {
+        if ([string]$cmdId -notmatch '^cmd_[A-Za-z0-9_.-]+$') { continue }
+        $path = Join-Path $dir ($cmdId + '.json')
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        $requestId = ''
+        try {
+            $obj = ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) | ConvertFrom-Json
+            $requestId = [string]$obj.requestId
+        } catch { }
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($requestId) {
+            $reqPath = Join-Path (Join-Path $script:FleetRequestsDir $DeviceId) $requestId
+            if (Test-Path -LiteralPath $reqPath) {
+                Remove-Item -LiteralPath $reqPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+# 面板“设备”视图：本机用量设备 + 已注册子机（含从未上报过的）
+function Get-GuardDeviceList {
+    $items = @(Get-GuardUsageDevices)
+    $localName = Get-GuardDeviceName
+    $byName = @{}
+    $result = @()
+    foreach ($item in $items) {
+        $name = [string]$item.name
+        $byName[$name] = $true
+        $result += [ordered]@{
+            name       = $name
+            lastActive = [string]$item.lastActive
+            current    = [bool]$item.current
+            fleet      = $false
+            online     = $false
+            lastSeen   = ''
+        }
+    }
+    foreach ($dev in @(Get-GuardFleetDeviceList)) {
+        $name = [string]$dev.name
+        if ($byName.ContainsKey($name)) {
+            foreach ($row in $result) {
+                if ($row.name -eq $name) {
+                    $row.fleet = $true
+                    $row.online = [bool]$dev.online
+                    $row.lastSeen = [string]$dev.lastSeen
+                }
+            }
+        } else {
+            $result += [ordered]@{
+                name       = $name
+                lastActive = [string]$dev.lastSeen
+                current    = ($name -eq $localName)
+                fleet      = $true
+                online     = [bool]$dev.online
+                lastSeen   = [string]$dev.lastSeen
+            }
+        }
+    }
+    return @($result | Sort-Object -Property name)
+}
+
+# ---------------- 子机侧 ----------------
+
+function Get-GuardFleetState {
+    $state = $null
+    if (Test-Path -LiteralPath $script:FleetStatePath) {
+        try {
+            $raw = [IO.File]::ReadAllText($script:FleetStatePath, [Text.Encoding]::UTF8)
+            if (-not [string]::IsNullOrWhiteSpace($raw)) { $state = $raw | ConvertFrom-Json }
+        } catch { $state = $null }
+    }
+    if (-not $state) {
+        $state = [pscustomobject]@{ cursor = ''; ack = @(); status = ''; lastSync = ''; lastErrorKind = ''; lastErrorAt = '' }
+    }
+    foreach ($name in @('cursor', 'status', 'lastSync', 'lastErrorKind', 'lastErrorAt')) {
+        if (-not $state.PSObject.Properties[$name]) {
+            $state | Add-Member -NotePropertyName $name -NotePropertyValue '' -Force
+        }
+    }
+    if (-not $state.PSObject.Properties['ack']) {
+        $state | Add-Member -NotePropertyName 'ack' -NotePropertyValue @() -Force
+    }
+    return $state
+}
+
+function Save-GuardFleetState {
+    param($State)
+    try {
+        Write-GuardJsonFile -Path $script:FleetStatePath -Object $State
+    } catch { }
+}
+
+function Invoke-GuardFleetHttp {
+    param(
+        [string]$Url,
+        [string]$Method = 'POST',
+        $Body = $null,
+        $Headers = @{}
+    )
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    } catch { }
+    try {
+        $json = $Body | ConvertTo-Json -Depth 8 -Compress
+        if ([string]::IsNullOrWhiteSpace($json)) { $json = '{}' }
+        $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+        $resp = Invoke-WebRequest -Uri $Url -Method $Method -Headers $Headers -Body $bytes `
+            -ContentType 'application/json; charset=utf-8' -TimeoutSec 15 -UseBasicParsing
+        $obj = $null
+        try { $obj = $resp.Content | ConvertFrom-Json } catch { $obj = $null }
+        return @{ ok = $true; status = [int]$resp.StatusCode; data = $obj }
+    } catch {
+        $code = 0
+        try {
+            if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+                $code = [int]$_.Exception.Response.StatusCode
+            }
+        } catch { }
+        return @{ ok = $false; status = $code; data = $null }
+    }
+}
+
+# 子机：读取游标之后需要上报的用量段（最多 Limit 条）
+function Get-GuardFleetUploadBatch {
+    param(
+        [string]$DeviceId,
+        [datetime]$Since,
+        [int]$Limit = 500
+    )
+    $usage = @()
+    $web = @()
+    $today = (Get-Date).Date
+    $from = $Since.Date.AddDays(-1)
+    if ($from -lt $today.AddDays(-30)) { $from = $today.AddDays(-30) }
+    $day = $from
+    while ($day -le $today) {
+        $ymd = $day.ToString('yyyyMMdd')
+        $usageFile = Join-Path $script:UsageDir ('usage_' + $ymd + '.jsonl')
+        if (Test-Path -LiteralPath $usageFile) {
+            foreach ($line in @([IO.File]::ReadAllLines($usageFile, [Text.Encoding]::UTF8))) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                try {
+                    $rec = $line | ConvertFrom-Json
+                    $e = [datetime]::ParseExact([string]$rec.e, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+                    if ($e -le $Since) { continue }
+                    $exe = [string]$rec.exe
+                    if ([string]::IsNullOrWhiteSpace($exe)) { continue }
+                    $id = New-GuardFleetRecordId -Kind 'usage' -DeviceId $DeviceId -Exe $exe -Start ([string]$rec.s) -End ([string]$rec.e)
+                    $usage += [ordered]@{
+                        d = [string]$rec.d; exe = $exe; name = [string]$rec.name
+                        s = [string]$rec.s; e = [string]$rec.e; sec = [int]$rec.sec; id = $id
+                    }
+                } catch { }
+            }
+        }
+        $webFile = Join-Path $script:UsageDir ('web_' + $ymd + '.jsonl')
+        if (Test-Path -LiteralPath $webFile) {
+            foreach ($line in @([IO.File]::ReadAllLines($webFile, [Text.Encoding]::UTF8))) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                try {
+                    $rec = $line | ConvertFrom-Json
+                    $e = [datetime]::ParseExact([string]$rec.e, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+                    if ($e -le $Since) { continue }
+                    $exe = [string]$rec.exe
+                    if ([string]::IsNullOrWhiteSpace($exe)) { continue }
+                    $hostName = [string]$rec.host
+                    $id = New-GuardFleetRecordId -Kind 'web' -DeviceId $DeviceId -Exe $exe -Start ([string]$rec.s) -End ([string]$rec.e) -Extra $hostName
+                    $item = [ordered]@{
+                        d = [string]$rec.d; exe = $exe; host = $hostName
+                        s = [string]$rec.s; e = [string]$rec.e; sec = [int]$rec.sec; id = $id
+                    }
+                    if ($rec.PSObject.Properties['basis']) { $item['basis'] = [string]$rec.basis }
+                    if ($rec.PSObject.Properties['note']) { $item['note'] = [string]$rec.note }
+                    if ($rec.PSObject.Properties['blocked'] -and [bool]$rec.blocked) { $item['blocked'] = $true }
+                    $web += $item
+                } catch { }
+            }
+        }
+        $day = $day.AddDays(1)
+    }
+    $usage = @($usage | Sort-Object -Property { $_['e'] } | Select-Object -First $Limit)
+    $web = @($web | Sort-Object -Property { $_['e'] } | Select-Object -First $Limit)
+    return @{ usage = @($usage); web = @($web) }
+}
+
+# 子机：执行主机下发的审批指令（成功返回，失败抛出以便下轮重试）
+function Invoke-GuardFleetCommand {
+    param($Command)
+    $action = [string]$Command.action
+    $requestId = [string]$Command.requestId
+    $path = $null
+    if ($requestId -match '^req_[A-Za-z0-9_.-]+\.json$') {
+        $candidate = Join-Path $script:RequestsDir $requestId
+        if (Test-Path -LiteralPath $candidate) { $path = $candidate }
+    }
+    if ($action -eq 'approve') {
+        $minutes = [int]$Command.minutes
+        if ($minutes -lt 1 -or $minutes -gt 240) { $minutes = 30 }
+        Set-UnlockMinutes -Minutes $minutes
+        if ($path) { Remove-GuardRequest -Path $path }
+        Write-Log ('已执行主机审批：放行 ' + $minutes + ' 分钟')
+        return
+    }
+    if ($action -eq 'deny') {
+        if ($path) { Remove-GuardRequest -Path $path }
+        Write-Log '已执行主机审批：拒绝申请'
+        return
+    }
+    throw '未知指令'
+}
+
+# 子机：每分钟同步（注册/上报/收指令/ACK）。未配置 fleetHost 时立即返回。
+function Invoke-GuardFleetSync {
+    $cfg = Get-GuardConfig
+    if (-not $cfg) { return }
+    $base = ([string]$cfg.fleetHost).Trim().TrimEnd('/')
+    if ([string]::IsNullOrWhiteSpace($base)) { return }
+    if ($base -notmatch '^https?://[^\s]+$') {
+        Write-Log '多设备上报：fleetHost 格式无效（需以 http:// 或 https:// 开头）'
+        return
+    }
+
+    $state = Get-GuardFleetState
+    $deviceId = [string]$cfg.fleetDeviceId
+    if (-not (Test-GuardFleetDeviceId $deviceId)) {
+        $deviceId = [Guid]::NewGuid().ToString('N')
+        $cfg.fleetDeviceId = $deviceId
+        Save-GuardConfig $cfg
+    }
+    $token = [string]$cfg.fleetDeviceToken
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        $joinCode = [string]$cfg.fleetJoinCode
+        if ([string]::IsNullOrWhiteSpace($joinCode)) {
+            if ($state.status -ne 'need-join') {
+                $state.status = 'need-join'
+                Save-GuardFleetState $state
+            }
+            return
+        }
+        $reg = Invoke-GuardFleetHttp -Url ($base + '/api/fleet/register') -Method POST -Body ([ordered]@{
+                v = 1; deviceId = $deviceId; name = (Get-GuardDeviceName)
+                version = [int]$cfg.version; joinCode = $joinCode
+            })
+        if (-not $reg.ok -or -not $reg.data -or -not $reg.data.ok) {
+            $state.status = 'join-failed'
+            $state.lastErrorKind = ('http-' + [string]$reg.status)
+            $state.lastErrorAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            Save-GuardFleetState $state
+            Write-Log ('多设备加入失败（状态 ' + $reg.status + '），请检查主机地址与配对码')
+            return
+        }
+        $cfg.fleetDeviceToken = [string]$reg.data.token
+        $cfg.fleetJoinCode = ''
+        $cfg.fleetStatus = 'joined'
+        $cfg.fleetMemberName = [string]$reg.data.name
+        Save-GuardConfig $cfg
+        $token = [string]$cfg.fleetDeviceToken
+        $state.status = 'joined'
+        $state.lastErrorKind = ''
+        Save-GuardFleetState $state
+        Write-Log ('已加入主机设备清单，显示名：' + [string]$reg.data.name)
+    }
+
+    $headers = @{ 'X-PG-Device' = $deviceId; 'X-PG-Device-Token' = $token }
+    $loops = 0
+    while ($loops -lt 8) {
+        $loops++
+        $since = (Get-Date).AddDays(-30)
+        $cursorText = [string]$state.cursor
+        if ($cursorText) {
+            try {
+                $cursorTime = [datetime]::ParseExact($cursorText, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+                $since = $cursorTime.AddMinutes(-10)   # 重叠窗口，配合主机去重
+            } catch { }
+        }
+        $batch = Get-GuardFleetUploadBatch -DeviceId $deviceId -Since $since -Limit 500
+        $localRequests = @()
+        foreach ($req in @(Get-GuardRequests)) {
+            $localRequests += [ordered]@{
+                id = [IO.Path]::GetFileName([string]$req.File)
+                time = [string]$req.time
+                kind = [string]$req.kind
+                target = [string]$req.target
+                minutes = [int]$req.minutes
+                reason = [string]$req.reason
+            }
+        }
+        $ack = @($state.ack)
+        $sentData = ($batch.usage.Count + $batch.web.Count + $localRequests.Count + $ack.Count) -gt 0
+        if (-not $sentData -and $loops -gt 1) { break }
+
+        $payload = [ordered]@{
+            v        = 1
+            device   = [ordered]@{ id = $deviceId; name = (Get-GuardDeviceName); version = [int]$cfg.version }
+            cursor   = [string]$state.cursor
+            usage    = @($batch.usage)
+            web      = @($batch.web)
+            requests = @($localRequests)
+            ack      = @($ack)
+        }
+        $resp = Invoke-GuardFleetHttp -Url ($base + '/api/fleet/report') -Method POST -Body $payload -Headers $headers
+
+        if ($resp.status -eq 401 -or $resp.status -eq 403) {
+            # 主机已移除该设备或令牌失效：停止重试，等待重新配对
+            $cfg.fleetDeviceToken = ''
+            $cfg.fleetStatus = 'removed'
+            Save-GuardConfig $cfg
+            $state.status = 'removed'
+            Save-GuardFleetState $state
+            Write-Log '多设备上报：主机拒绝了本机令牌（可能已被移除），已暂停上报，需重新配对'
+            return
+        }
+        if (-not $resp.ok -or -not $resp.data -or -not $resp.data.ok) {
+            $state.status = 'error'
+            $kind = 'http-' + [string]$resp.status
+            $lastAt = ''
+            try {
+                if ($state.lastErrorAt) { $lastAt = $state.lastErrorAt }
+            } catch { }
+            $shouldLog = ($kind -ne [string]$state.lastErrorKind)
+            if (-not $shouldLog -and $lastAt) {
+                try {
+                    $age = ((Get-Date) - [datetime]::ParseExact($lastAt, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)).TotalMinutes
+                    if ($age -ge 30) { $shouldLog = $true }
+                } catch { $shouldLog = $true }
+            }
+            $state.lastErrorKind = $kind
+            $state.lastErrorAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+            Save-GuardFleetState $state
+            if ($shouldLog) { Write-Log ('多设备上报失败（状态 ' + $resp.status + '），数据保留在本地，恢复后自动补报') }
+            return
+        }
+
+        # 游标推进
+        $newCursor = [string]$resp.data.cursor
+        if ($newCursor -and (Test-GuardFleetTimestamp $newCursor)) {
+            if (-not $state.cursor -or [string]::CompareOrdinal($newCursor, [string]$state.cursor) -gt 0) {
+                $state.cursor = $newCursor
+            }
+        }
+
+        # 已 ACK 的指令从待确认列表移除
+        if ($ack.Count -gt 0) {
+            $remaining = @()
+            foreach ($id in @($state.ack)) {
+                if (@($ack) -notcontains $id) { $remaining += $id }
+            }
+            $state.ack = @($remaining)
+        }
+
+        # 执行主机指令；成功才进入下轮 ACK
+        $applied = @()
+        foreach ($cmd in @($resp.data.commands)) {
+            if (-not $cmd) { continue }
+            try {
+                Invoke-GuardFleetCommand -Command $cmd
+                $applied += [string]$cmd.id
+            } catch {
+                Write-Log ('多设备指令执行失败：' + $_.Exception.Message)
+            }
+        }
+        if ($applied.Count -gt 0) {
+            $state.ack = @(@($state.ack) + $applied | Select-Object -Unique)
+        }
+        $state.status = 'joined'
+        $state.lastSync = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        $state.lastErrorKind = ''
+        Save-GuardFleetState $state
+
+        if ($applied.Count -gt 0) { continue }        # 再发一轮把 ACK 带回主机
+        if (-not $sentData) { break }
+        if ($batch.usage.Count -eq 0 -and $batch.web.Count -eq 0) { break }
     }
 }
 

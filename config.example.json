@@ -116,5 +116,11 @@
   "remoteEnabled": true,
   "remotePort": 8787,
   "remoteToken": "",
-  "barkKey": ""
+  "barkKey": "",
+  "fleetHost": "",
+  "fleetJoinCode": "",
+  "fleetDeviceId": "",
+  "fleetDeviceToken": "",
+  "fleetMemberName": "",
+  "fleetStatus": ""
 }

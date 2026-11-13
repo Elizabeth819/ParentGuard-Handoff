@@ -79,6 +79,13 @@ try {
         Write-Log ('用量采样异常：' + $_.Exception.Message)
     }
 
+    # 多设备汇总：作为子机向主机上报本机数据并取回审批指令（未配置 fleetHost 时直接返回）
+    try {
+        Invoke-GuardFleetSync
+    } catch {
+        Write-Log ('多设备同步异常：' + $_.Exception.Message)
+    }
+
     # 手机控制台进程是否在运行
     $listening = $false
     if ([bool]$cfg.remoteEnabled) {
