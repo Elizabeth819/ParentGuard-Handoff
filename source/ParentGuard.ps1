@@ -63,7 +63,7 @@ function Install-Guard {
         }
     }
 
-    $files = @('ParentGuard.ps1', 'GuardCore.ps1', 'watchdog.ps1', 'Show-Blocked.ps1', 'RemotePanel.ps1', 'health.ps1')
+    $files = @('ParentGuard.ps1', 'GuardCore.ps1', 'watchdog.ps1', 'Show-Blocked.ps1', 'RemotePanel.ps1', 'health.ps1', 'RunHidden.vbs')
     foreach ($name in $files) {
         $source = Join-Path $PSScriptRoot $name
         $dest = Join-Path $script:GuardRoot $name
@@ -143,6 +143,11 @@ function Set-GuardAcls {
     if (Test-Path -LiteralPath $stub) {
         & icacls.exe $stub /grant:r '*S-1-5-32-545:RX' 2>&1 | Out-Null
     }
+    # 无窗口启动器由交互用户会话里的计划任务调用，必须让普通用户可读可执行
+    $launcher = Join-Path $script:GuardRoot 'RunHidden.vbs'
+    if (Test-Path -LiteralPath $launcher) {
+        & icacls.exe $launcher /grant:r '*S-1-5-32-545:RX' 2>&1 | Out-Null
+    }
 }
 
 function Install-GuardTasks {
@@ -174,6 +179,49 @@ function Install-GuardTasks {
         $healthCmd = '{0} -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File {1}' -f $psExe, $health
         & schtasks.exe /Create /TN 'ParentGuard-Health' /TR $healthCmd /SC MINUTE /MO 5 `
             /RU SYSTEM /RL HIGHEST /F 2>&1 | Out-Null
+    }
+
+    # 程序用量采集：在交互用户会话中每分钟运行（SYSTEM 看不到用户窗口，必须用户身份）
+    $meter = Join-Path $script:GuardRoot 'UsageMeter.ps1'
+    if (Test-Path -LiteralPath $meter) {
+        try {
+            # 用 wscript.exe（GUI 子系统）做启动器：它自身不创建控制台，再用 SW_HIDE(0)
+            # 拉起 powershell，控制台窗口从创建起就是隐藏的，不会闪烁。
+            # 直接让任务执行 powershell.exe 时，-WindowStyle Hidden 是在控制台创建之后
+            # 才生效，实测每分钟都会闪一下蓝色控制台窗口。
+            $launcher = Join-Path $script:GuardRoot 'RunHidden.vbs'
+            if (-not (Test-Path -LiteralPath $launcher)) {
+                Set-Content -LiteralPath $launcher -Encoding ASCII -Value @(
+                    "' ParentGuard hidden launcher (GUI subsystem: creates no console itself).",
+                    'Option Explicit',
+                    'Dim exe, script, extra, i, cmd',
+                    'If WScript.Arguments.Count < 2 Then WScript.Quit 2',
+                    'exe = WScript.Arguments(0)',
+                    'script = WScript.Arguments(1)',
+                    'extra = ""',
+                    'For i = 2 To WScript.Arguments.Count - 1',
+                    '    extra = extra & " " & WScript.Arguments(i)',
+                    'Next',
+                    'cmd = """" & exe & """ -NoProfile -ExecutionPolicy Bypass -File """ & script & """" & extra',
+                    'CreateObject("WScript.Shell").Run cmd, 0, False'
+                )
+            }
+            & icacls.exe $launcher /grant:r '*S-1-5-32-545:RX' 2>&1 | Out-Null
+            $meterAction = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\wscript.exe') `
+                -Argument ('//B //Nologo "{0}" "{1}" "{2}"' -f $launcher, $psExe, $meter)
+            # 与 Watchdog（每分钟整点）错开 30 秒触发：否则两个任务同一秒启动，
+            # 守护进程读到的是上一分钟的旧快照，导致开/闭段整体晚 1-2 分钟
+            $meterTrigTime = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1).AddSeconds(30) `
+                -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+            $meterTrigLogon = New-ScheduledTaskTrigger -AtLogOn
+            # 实测 Limited 会导致任务无法写 ProgramData（0xC0000...），必须 Highest
+            $meterPrincipal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-4' -RunLevel Highest
+            $meterSettings = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
+                -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+            Register-ScheduledTask -TaskName 'ParentGuard-UsageMeter' -Action $meterAction `
+                -Trigger @($meterTrigTime, $meterTrigLogon) -Principal $meterPrincipal `
+                -Settings $meterSettings -Description 'ParentGuard per-user usage collector' -Force | Out-Null
+        } catch { Write-Host ("  [警告] 创建用量采集任务失败：" + $_.Exception.Message) -ForegroundColor Yellow }
     }
 }
 
@@ -240,6 +288,7 @@ function Uninstall-Guard {
     & schtasks.exe /End /TN 'ParentGuard-Panel' 2>&1 | Out-Null
     & schtasks.exe /Delete /TN 'ParentGuard-Panel' /F 2>&1 | Out-Null
     & schtasks.exe /Delete /TN 'ParentGuard-Health' /F 2>&1 | Out-Null
+    & schtasks.exe /Delete /TN 'ParentGuard-UsageMeter' /F 2>&1 | Out-Null
 
     $port = Get-GuardRemotePort
     try {
@@ -1062,6 +1111,8 @@ function Show-GuardVerification {
     Write-Host ('策略完整性    : ' + (Test-GuardApplied -Config $cfg))
     $taskWatch = & schtasks.exe /Query /TN 'ParentGuard-Watchdog' 2>&1
     Write-Host ('守护任务      : ' + ($LASTEXITCODE -eq 0))
+    $taskMeter = & schtasks.exe /Query /TN 'ParentGuard-UsageMeter' 2>&1
+    Write-Host ('用量采集任务  : ' + ($LASTEXITCODE -eq 0))
     Write-Host ('拦截提示脚本  : ' + (Test-Path -LiteralPath $script:StubScript))
     Write-Host ('待处理申请    : ' + @(Get-GuardRequests).Count)
     Write-Host ''

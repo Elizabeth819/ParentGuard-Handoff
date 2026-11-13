@@ -27,6 +27,8 @@ function Initialize-GuardPaths {
     $script:StatePath   = Join-Path $script:GuardRoot 'state.txt'
     $script:LogPath     = Join-Path $script:GuardRoot 'logs\guard.log'
     $script:RequestsDir = Join-Path $script:GuardRoot 'requests'
+    $script:UsageDir    = Join-Path $script:GuardRoot 'usage'
+    $script:UsageInboxDir = Join-Path $script:UsageDir 'inbox'
     $script:BackupDir   = Join-Path $script:GuardRoot 'backup'
     $script:StubScript  = Join-Path $script:GuardRoot 'Show-Blocked.ps1'
     $script:PanelScript = Join-Path $script:GuardRoot 'RemotePanel.ps1'
@@ -153,6 +155,7 @@ function Get-DefaultConfig {
     return [pscustomobject]@{
         version             = 2
         installedAt         = (Get-Date).ToString('o')
+        deviceName          = ''
         passwordSalt        = ''
         passwordHash        = ''
         passwordIterations  = 20000
@@ -301,13 +304,16 @@ function Update-GuardConfigDefaults {
     if (-not $Config) { $Config = Get-GuardConfig }
     if (-not $Config) { return $null }
     $defaults = Get-DefaultConfig
-    foreach ($name in @('remoteEnabled', 'remotePort', 'remoteToken', 'barkKey')) {
+    foreach ($name in @('remoteEnabled', 'remotePort', 'remoteToken', 'barkKey', 'deviceName')) {
         if (-not $Config.PSObject.Properties[$name]) {
             $Config | Add-Member -NotePropertyName $name -NotePropertyValue $defaults.$name -Force
         }
     }
     if ([string]::IsNullOrWhiteSpace([string]$Config.remoteToken)) {
         $Config.remoteToken = New-GuardRemoteToken
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$Config.deviceName)) {
+        $Config.deviceName = $env:COMPUTERNAME
     }
     if ([int]$Config.version -lt 2) { $Config.version = 2 }
     return $Config
@@ -1091,6 +1097,1080 @@ function Remove-GuardRequest {
     param([string]$Path)
     if ($Path -and (Test-Path -LiteralPath $Path)) {
         Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ---------------------------------------------------------------------
+# 程序用量统计（守护任务每分钟采样一次，只统计带窗口的程序）
+# ---------------------------------------------------------------------
+
+function Get-GuardDeviceName {
+    $cfg = Get-GuardConfig
+    if ($cfg -and -not [string]::IsNullOrWhiteSpace([string]$cfg.deviceName)) {
+        return [string]$cfg.deviceName
+    }
+    return $env:COMPUTERNAME
+}
+
+function Get-GuardUsageOpenPath {
+    return (Join-Path $script:UsageDir 'open.json')
+}
+
+# 上一次真正观测到的时刻（采样空档检测用）：空档里的时间不算给任何程序/站点
+function Get-GuardLastObsPath {
+    return (Join-Path $script:UsageDir 'lastobs.json')
+}
+
+function Read-GuardLastObs {
+    $path = Get-GuardLastObsPath
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try {
+        $obj = ([IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)) | ConvertFrom-Json
+        return [datetime]::ParseExact([string]$obj.ts, 'yyyy-MM-dd HH:mm:ss', $null)
+    } catch { return $null }
+}
+
+function Save-GuardLastObs {
+    param([datetime]$Ts)
+    try {
+        $path = Get-GuardLastObsPath
+        if (-not (Test-Path -LiteralPath $script:UsageDir)) {
+            New-Item -ItemType Directory -Path $script:UsageDir -Force | Out-Null
+        }
+        $json = ('{"ts":"' + $Ts.ToString('yyyy-MM-dd HH:mm:ss') + '"}')
+        [IO.File]::WriteAllText($path, $json, (New-Object Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+function Read-GuardUsageOpen {
+    $path = Get-GuardUsageOpenPath
+    if (-not (Test-Path -LiteralPath $path)) { return @{} }
+    try {
+        $raw = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
+        if ([string]::IsNullOrWhiteSpace($raw)) { return @{} }
+        $obj = $raw | ConvertFrom-Json
+        $table = @{}
+        foreach ($p in $obj.PSObject.Properties) {
+            $table[$p.Name] = @{
+                name  = [string]$p.Value.name
+                start = [string]$p.Value.start
+            }
+        }
+        return $table
+    } catch {
+        return @{}
+    }
+}
+
+function Save-GuardUsageOpen {
+    param([hashtable]$Open)
+    $path = Get-GuardUsageOpenPath
+    if ($Open.Count -eq 0) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+        return
+    }
+    if (-not (Test-Path -LiteralPath $script:UsageDir)) {
+        New-Item -ItemType Directory -Path $script:UsageDir -Force | Out-Null
+    }
+    $json = $Open | ConvertTo-Json -Depth 4 -Compress
+    [IO.File]::WriteAllText($path, $json, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Write-GuardUsageSegment {
+    param(
+        [string]$Exe,
+        [string]$Name,
+        [datetime]$Start,
+        [datetime]$End
+    )
+    # 用截断而不是四舍五入：落盘的 e 也是截断到秒的，保证 sec 与 (e - s) 完全一致
+    $seconds = [int](($End - $Start).TotalSeconds)
+    if ($seconds -lt 30) { return }   # 少于 30 秒的偶发窗口不记录
+    if (-not (Test-Path -LiteralPath $script:UsageDir)) {
+        New-Item -ItemType Directory -Path $script:UsageDir -Force | Out-Null
+    }
+    $file = Join-Path $script:UsageDir ('usage_' + $Start.ToString('yyyyMMdd') + '.jsonl')
+    $record = [ordered]@{
+        d    = (Get-GuardDeviceName)
+        exe  = $Exe
+        name = $Name
+        s    = $Start.ToString('yyyy-MM-dd HH:mm:ss')
+        e    = $End.ToString('yyyy-MM-dd HH:mm:ss')
+        sec  = $seconds
+    }
+    $line = ($record | ConvertTo-Json -Compress)
+    [IO.File]::AppendAllText($file, $line + "`r`n", (New-Object Text.UTF8Encoding($false)))
+}
+
+function Update-GuardUsage {
+    $now = Get-Date
+    # SYSTEM 会话看不到用户窗口，真实的"正在使用"列表由用户会话里的 UsageMeter 采集后写入 inbox，
+    # 这里（SYSTEM 端）只消费 inbox 里 2 分钟内的新鲜快照
+    $running = @{}
+    $sites = @{}
+    $obs = $null
+
+    # 采集任务与守护任务几乎同秒触发，直接读会拿到"上一分钟"的快照（开/闭段整体晚 1-2 分钟）。
+    # 这里最多等 9 秒，等用户会话把本分钟的快照写出来；快照长时间不新鲜则不再等待。
+    for ($i = 0; $i -lt 3; $i++) {
+        $newest = Get-ChildItem -LiteralPath $script:UsageInboxDir -Filter 'sess_*.json' -File -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($newest -and ((Get-Date) - $newest.LastWriteTime).TotalSeconds -lt 45) { break }
+        Start-Sleep -Seconds 3
+    }
+    $now = Get-Date
+
+    try {
+        Set-GuardUsageInboxAcl
+        $cutoff = $now.AddMinutes(-2)
+        foreach ($f in @(Get-ChildItem -LiteralPath $script:UsageInboxDir -Filter 'sess_*.json' -File -ErrorAction SilentlyContinue)) {
+            if ($f.LastWriteTime -lt $cutoff) {
+                Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+                continue
+            }
+            try {
+                $snap = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
+                # 记录快照自身的采样时刻：段边界用它比用守护进程启动时刻更贴近真实观测时刻
+                if ($snap.ts) {
+                    try {
+                        $ts = [datetime]::ParseExact([string]$snap.ts, 'yyyy-MM-dd HH:mm:ss', $null)
+                        if (-not $obs -or $ts -gt $obs) { $obs = $ts }
+                    } catch { }
+                }
+                foreach ($prop in $snap.procs.PSObject.Properties) {
+                    if (-not $running.ContainsKey($prop.Name)) { $running[$prop.Name] = [string]$prop.Value }
+                }
+                if ($snap.sites) {
+                    foreach ($prop in $snap.sites.PSObject.Properties) {
+                        if (-not $sites.ContainsKey($prop.Name)) {
+                            $sites[$prop.Name] = @{
+                                host  = [string]$prop.Value.host
+                                basis = [string]$prop.Value.basis
+                                note  = [string]$prop.Value.note
+                                title = [string]$prop.Value.title
+                            }
+                        }
+                    }
+                }
+            } catch { }
+        }
+    } catch { }
+
+    $open = Read-GuardUsageOpen
+    $changed = $false
+    # 边界时刻：优先用快照采样时刻（快照过期太久时退回当前时刻）
+    $boundary = $now
+    if ($obs -and ($now - $obs).TotalSeconds -lt 150) { $boundary = $obs }
+
+    # 采样空档（休眠/关机/任务未运行）：空档里没有任何观测，不能把这段时间算给程序或站点。
+    # 超过 150 秒没有观测就把开着的段收口在上次观测时刻，再从 boundary 重新开段。
+    $gap = $false
+    $lastObs = Read-GuardLastObs
+    if ($lastObs -and ($boundary - $lastObs).TotalSeconds -gt 150) { $gap = $true }
+    $closeAt = $boundary
+    if ($gap) { $closeAt = $lastObs }
+
+    if ($gap) {
+        foreach ($exe in @($open.Keys)) {
+            $entry = $open[$exe]
+            $startTime = $null
+            try { $startTime = [datetime]::ParseExact([string]$entry.start, 'yyyy-MM-dd HH:mm:ss', $null) } catch { $startTime = $null }
+            if ($startTime) {
+                try { Write-GuardUsageSegment -Exe $exe -Name ([string]$entry.name) -Start $startTime -End $closeAt } catch { }
+            }
+        }
+        $open = @{}
+        $changed = $true
+    }
+
+    # 新出现的程序：开启一段
+    foreach ($exe in $running.Keys) {
+        if (-not $open.ContainsKey($exe)) {
+            $open[$exe] = @{ name = $running[$exe]; start = $boundary.ToString('yyyy-MM-dd HH:mm:ss') }
+            $changed = $true
+        }
+    }
+
+    # 已关闭的程序：结束该段并落盘
+    foreach ($exe in @($open.Keys)) {
+        if (-not $running.ContainsKey($exe)) {
+            $entry = $open[$exe]
+            $startTime = $null
+            try {
+                $startTime = [datetime]::ParseExact([string]$entry.start, 'yyyy-MM-dd HH:mm:ss', $null)
+            } catch { $startTime = $null }
+            if ($startTime) {
+                try {
+                    Write-GuardUsageSegment -Exe $exe -Name ([string]$entry.name) -Start $startTime -End $closeAt
+                } catch { }
+            }
+            $open.Remove($exe)
+            $changed = $true
+        }
+    }
+
+    if ($changed) { Save-GuardUsageOpen -Open $open }
+
+    # 浏览器站点维度：同一份快照里按"浏览器 + 当前站点"开段/闭段
+    try { Update-GuardWebUsage -Running $running -Sites $sites -Now $boundary -CloseAt $closeAt -Reset:$gap } catch { }
+
+    # 只有拿到新鲜快照时才推进"上次观测时刻"，避免把停机时间当成已观测
+    if ($obs) { Save-GuardLastObs -Ts $boundary }
+
+    # 每小时整点附近清理一次历史文件
+    if ($now.Minute -eq 0) { Remove-GuardOldUsage -KeepDays 30 }
+}
+
+# 确保 usage\inbox 目录存在且 ACL 正确：任何登录用户可写入自己的快照文件，
+# 但只有创建者能改/删自己的文件（CREATOR OWNER），SYSTEM 始终完全控制
+function Set-GuardUsageInboxAcl {
+    if (Test-Path -LiteralPath $script:UsageInboxDir) {
+        if ($script:UsageInboxAclDone) { return }
+    } else {
+        New-Item -ItemType Directory -Path $script:UsageInboxDir -Force | Out-Null
+    }
+    try {
+        & icacls.exe $script:UsageInboxDir /inheritance:d 2>$null | Out-Null
+        & icacls.exe $script:UsageInboxDir /grant 'Users:(WD,AD)' 2>$null | Out-Null
+        & icacls.exe $script:UsageInboxDir /grant 'CREATOR OWNER:(OI)(CI)(IO)(F)' 2>$null | Out-Null
+        & icacls.exe $script:UsageInboxDir /grant 'SYSTEM:(OI)(CI)(F)' 2>$null | Out-Null
+        & icacls.exe $script:UsageInboxDir /grant 'Administrators:(OI)(CI)(F)' 2>$null | Out-Null
+        # 采集脚本本身需要对普通用户可读（Limited 令牌下任务才能加载它）
+        $meterScript = Join-Path $script:GuardRoot 'UsageMeter.ps1'
+        if (Test-Path -LiteralPath $meterScript) {
+            & icacls.exe $meterScript /grant 'Users:(R)' 2>$null | Out-Null
+        }
+        $script:UsageInboxAclDone = $true
+    } catch { }
+}
+
+function Remove-GuardOldUsage {
+    param([int]$KeepDays = 30)
+    if (-not (Test-Path -LiteralPath $script:UsageDir)) { return }
+    $limit = (Get-Date).AddDays(-1 * $KeepDays)
+    foreach ($pattern in @('usage_*.jsonl', 'web_*.jsonl')) {
+        foreach ($file in @(Get-ChildItem -LiteralPath $script:UsageDir -Filter $pattern -File -ErrorAction SilentlyContinue)) {
+            if ($file.LastWriteTime -lt $limit) {
+                Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+function Get-GuardUsageDevices {
+    $devices = @{}
+    if (Test-Path -LiteralPath $script:UsageDir) {
+        foreach ($pattern in @('usage_*.jsonl', 'web_*.jsonl')) {
+            foreach ($file in @(Get-ChildItem -LiteralPath $script:UsageDir -Filter $pattern -File -ErrorAction SilentlyContinue)) {
+                foreach ($line in @([IO.File]::ReadAllLines($file.FullName, [Text.Encoding]::UTF8))) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    try {
+                        $rec = $line | ConvertFrom-Json
+                        $dev = [string]$rec.d
+                        if ([string]::IsNullOrWhiteSpace($dev)) { $dev = $env:COMPUTERNAME }
+                        $last = [string]$rec.e
+                        if (-not $devices.ContainsKey($dev) -or $devices[$dev] -lt $last) {
+                            $devices[$dev] = $last
+                        }
+                    } catch { }
+                }
+            }
+        }
+    }
+    $open = Read-GuardUsageOpen
+    if ($open.Count -gt 0) {
+        $dev = Get-GuardDeviceName
+        $nowText = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+        if (-not $devices.ContainsKey($dev) -or $devices[$dev] -lt $nowText) {
+            $devices[$dev] = $nowText
+        }
+    }
+    $list = @()
+    foreach ($name in @($devices.Keys | Sort-Object)) {
+        $list += [ordered]@{
+            name       = $name
+            lastActive = $devices[$name]
+            current    = ($name -eq (Get-GuardDeviceName))
+        }
+    }
+    return @($list)
+}
+
+function Get-GuardUsageReport {
+    param(
+        [string]$Device,
+        [string]$Date   # yyyyMMdd，默认今天
+    )
+    if ([string]::IsNullOrWhiteSpace($Date) -or $Date -notmatch '^\d{8}$') {
+        $Date = (Get-Date).ToString('yyyyMMdd')
+    }
+    $dayStart = [datetime]::ParseExact($Date, 'yyyyMMdd', $null)
+    $now = Get-Date
+    $dayEnd = $dayStart.AddDays(1)
+    if ($dayEnd -gt $now) { $dayEnd = $now }
+
+    $segments = @()
+    # 读前一天与当天文件：前一天开启、跨午夜结束的会话也计入当天
+    foreach ($d in @($dayStart.AddDays(-1), $dayStart)) {
+        $file = Join-Path $script:UsageDir ('usage_' + $d.ToString('yyyyMMdd') + '.jsonl')
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        foreach ($line in @([IO.File]::ReadAllLines($file, [Text.Encoding]::UTF8))) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try { $segments += ($line | ConvertFrom-Json) } catch { }
+        }
+    }
+    # 正在进行的会话（结束时间按当前时刻显示）
+    $open = Read-GuardUsageOpen
+    foreach ($exe in $open.Keys) {
+        $entry = $open[$exe]
+        $segments += [pscustomobject]@{
+            d    = (Get-GuardDeviceName)
+            exe  = $exe
+            name = [string]$entry.name
+            s    = [string]$entry.start
+            e    = $now.ToString('yyyy-MM-dd HH:mm:ss')
+            live = $true
+        }
+    }
+
+    $programs = @{}
+    foreach ($rec in $segments) {
+        if (-not [string]::IsNullOrWhiteSpace($Device) -and [string]$rec.d -ne $Device) { continue }
+        $s = $null; $e = $null
+        try { $s = [datetime]::ParseExact([string]$rec.s, 'yyyy-MM-dd HH:mm:ss', $null) } catch { }
+        try { $e = [datetime]::ParseExact([string]$rec.e, 'yyyy-MM-dd HH:mm:ss', $null) } catch { }
+        if (-not $s -or -not $e) { continue }
+        # 只保留与当天有交集的段，并把起止时间裁剪到当天范围内
+        if ($e -le $dayStart -or $s -ge $dayEnd) { continue }
+        if ($s -lt $dayStart) { $s = $dayStart }
+        if ($e -gt $dayEnd) { $e = $dayEnd }
+        $secs = [int][math]::Max(0, ($e - $s).TotalSeconds)
+        if ($secs -lt 1) { continue }
+        $exe = [string]$rec.exe
+        if (-not $programs.ContainsKey($exe)) {
+            $programs[$exe] = @{
+                name = [string]$rec.name
+                exe = $exe
+                totalSeconds = 0
+                sessions = @()
+            }
+        }
+        $programs[$exe].totalSeconds += $secs
+        $programs[$exe].sessions += [ordered]@{
+            start   = $s.ToString('HH:mm')
+            end     = $(if ($rec.live) { '进行中' } else { $e.ToString('HH:mm') })
+            seconds = $secs
+        }
+    }
+
+    $items = @()
+    foreach ($exe in $programs.Keys) {
+        $p = $programs[$exe]
+        $items += [ordered]@{
+            exe          = $p.exe
+            name         = $p.name
+            totalSeconds = $p.totalSeconds
+            sessions     = @($p.sessions)
+        }
+    }
+    return [ordered]@{
+        date   = $Date
+        device = $Device
+        items  = @($items | Sort-Object -Property totalSeconds -Descending)
+    }
+}
+
+# ---------------------------------------------------------------------
+# 网站用量统计（浏览器当前站点由用户会话侧判定，SYSTEM 侧聚合落盘）
+# ---------------------------------------------------------------------
+
+function Format-GuardDuration {
+    param([int]$Seconds)
+    if ($Seconds -lt 60) { return ('{0} 秒' -f $Seconds) }
+    $m = [int][math]::Floor($Seconds / 60)
+    $h = [int][math]::Floor($m / 60)
+    if ($h -gt 0) { return ('{0} 小时 {1} 分' -f $h, ($m % 60)) }
+    return ('{0} 分钟' -f $m)
+}
+
+function Get-GuardWebOpenPath {
+    return (Join-Path $script:UsageDir 'openweb.json')
+}
+
+function Read-GuardWebOpen {
+    $path = Get-GuardWebOpenPath
+    if (-not (Test-Path -LiteralPath $path)) { return @{} }
+    try {
+        $raw = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
+        if ([string]::IsNullOrWhiteSpace($raw)) { return @{} }
+        $obj = $raw | ConvertFrom-Json
+        $table = @{}
+        foreach ($p in $obj.PSObject.Properties) {
+            $table[$p.Name] = @{
+                exe   = [string]$p.Value.exe
+                host  = [string]$p.Value.host
+                basis = [string]$p.Value.basis
+                note  = [string]$p.Value.note
+                start = [string]$p.Value.start
+            }
+        }
+        return $table
+    } catch {
+        return @{}
+    }
+}
+
+function Save-GuardWebOpen {
+    param([hashtable]$Open)
+    $path = Get-GuardWebOpenPath
+    if ($Open.Count -eq 0) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+        return
+    }
+    if (-not (Test-Path -LiteralPath $script:UsageDir)) {
+        New-Item -ItemType Directory -Path $script:UsageDir -Force | Out-Null
+    }
+    $json = $Open | ConvertTo-Json -Depth 4 -Compress
+    [IO.File]::WriteAllText($path, $json, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Write-GuardWebSegment {
+    param(
+        [string]$Exe,
+        [string]$HostName,
+        [datetime]$Start,
+        [datetime]$End,
+        [string]$Basis = '',
+        [string]$Note = '',
+        [bool]$Blocked = $false
+    )
+    # 同程序段：截断取整，保证 sec == e - s
+    $seconds = [int](($End - $Start).TotalSeconds)
+    if ($seconds -lt 30) { return }
+    if (-not (Test-Path -LiteralPath $script:UsageDir)) {
+        New-Item -ItemType Directory -Path $script:UsageDir -Force | Out-Null
+    }
+    $file = Join-Path $script:UsageDir ('web_' + $Start.ToString('yyyyMMdd') + '.jsonl')
+    $record = [ordered]@{
+        d    = (Get-GuardDeviceName)
+        exe  = $Exe
+        host = $HostName
+        s    = $Start.ToString('yyyy-MM-dd HH:mm:ss')
+        e    = $End.ToString('yyyy-MM-dd HH:mm:ss')
+        sec  = $seconds
+    }
+    # 归因依据随段落落盘：面板据此展示"这一段时间是怎么判出来的"
+    if (-not [string]::IsNullOrWhiteSpace($Basis)) { $record['basis'] = $Basis }
+    if (-not [string]::IsNullOrWhiteSpace($Note)) { $record['note'] = $Note }
+    if ($Blocked) { $record['blocked'] = $true }
+    $line = ($record | ConvertTo-Json -Compress)
+    [IO.File]::AppendAllText($file, $line + "`r`n", (New-Object Text.UTF8Encoding($false)))
+}
+
+# 站点域名是否命中拦截名单（与策略引擎一致：白名单优先）。只用来给段落加"（已拦截）"标记，
+# 不改变用量本身；拦截名单只在 SYSTEM 侧读取，避免普通用户从快照里反推出完整拦截名单。
+function Test-GuardDomainBlocked {
+    param([string]$HostName)
+    $h = ([string]$HostName).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($h)) { return $false }
+    if (-not $script:GuardBlockDomains) {
+        $block = @{}
+        $allow = @{}
+        try {
+            $cfg = Get-GuardConfig
+            foreach ($d in @($cfg.domainBlockList)) { $block[([string]$d).ToLowerInvariant().TrimStart('.')] = $true }
+            foreach ($d in @($cfg.domainAllowList)) { $allow[([string]$d).ToLowerInvariant().TrimStart('.')] = $true }
+        } catch { }
+        $script:GuardBlockDomains = @{ block = $block; allow = $allow }
+    }
+    foreach ($d in @($script:GuardBlockDomains.allow.Keys)) {
+        if ($h -eq $d -or $h.EndsWith('.' + $d)) { return $false }
+    }
+    foreach ($d in @($script:GuardBlockDomains.block.Keys)) {
+        if ($h -eq $d -or $h.EndsWith('.' + $d)) { return $true }
+    }
+    return $false
+}
+
+# 浏览器可见时，按"浏览器 + 当前站点"开段/闭段。
+# host 为空表示"没有站点"，但仍然带 basis/note 说明真实状态（新标签页/错误页/无证据），
+# 报告里这类时间单独列出，不再用"未知"兜底。
+function Update-GuardWebUsage {
+    param(
+        [hashtable]$Running,
+        [hashtable]$Sites,
+        [datetime]$Now,
+        [datetime]$CloseAt = $Now,
+        [switch]$Reset
+    )
+    $webOpen = Read-GuardWebOpen
+    $changed = $false
+
+    # 休眠/停机导致的采样空档：先把所有开着的段收口在最后一次观测时刻，
+    # 空档期间没有观测，不能算到任何站点头上
+    if ($Reset) {
+        foreach ($key in @($webOpen.Keys)) {
+            $entry = $webOpen[$key]
+            $startTime = $null
+            try { $startTime = [datetime]::ParseExact([string]$entry.start, 'yyyy-MM-dd HH:mm:ss', $null) } catch { }
+            if ($startTime) {
+                try {
+                    Write-GuardWebSegment -Exe ([string]$entry.exe) -HostName ([string]$entry.host) -Start $startTime -End $CloseAt `
+                        -Basis ([string]$entry.basis) -Note ([string]$entry.note) -Blocked (Test-GuardDomainBlocked ([string]$entry.host))
+                } catch { }
+            }
+        }
+        $webOpen = @{}
+        $changed = $true
+    }
+
+    $targets = @{}
+    foreach ($exe in $Running.Keys) {
+        if ($exe -notmatch '^(msedge|chrome)\.exe$') { continue }
+        $hostName = ''
+        $basis = ''
+        $note = ''
+        if ($Sites.ContainsKey($exe)) {
+            $hostName = [string]$Sites[$exe].host
+            $basis = [string]$Sites[$exe].basis
+            $note = [string]$Sites[$exe].note
+        }
+        if ([string]::IsNullOrWhiteSpace($hostName) -and [string]::IsNullOrWhiteSpace($basis)) {
+            $basis = '无页面证据'
+            $note = '浏览器窗口存在，但当前页面没有留下可归因的记录'
+        }
+        $key = $exe + '|' + $hostName
+        $targets[$key] = @{ exe = $exe; host = $hostName; basis = $basis; note = $note }
+    }
+
+    foreach ($key in @($webOpen.Keys)) {
+        $entry = $webOpen[$key]
+        $isTarget = $targets.ContainsKey($key)
+        $basisChanged = $false
+        if ($isTarget -and [string]::IsNullOrWhiteSpace($targets[$key].host)) {
+            # 空 host 段：依据变了（例如 新标签页 → 错误页）就收口重开，保证依据跟着时段走
+            if ([string]$entry.basis -ne [string]$targets[$key].basis) { $basisChanged = $true }
+        }
+        if (-not $isTarget -or $basisChanged) {
+            $startTime = $null
+            try { $startTime = [datetime]::ParseExact([string]$entry.start, 'yyyy-MM-dd HH:mm:ss', $null) } catch { }
+            if ($startTime) {
+                try {
+                    Write-GuardWebSegment -Exe ([string]$entry.exe) -HostName ([string]$entry.host) -Start $startTime -End $CloseAt `
+                        -Basis ([string]$entry.basis) -Note ([string]$entry.note) -Blocked (Test-GuardDomainBlocked ([string]$entry.host))
+                } catch { }
+            }
+            if ($basisChanged) {
+                $webOpen[$key] = @{
+                    exe   = $entry.exe
+                    host  = ''
+                    basis = $targets[$key].basis
+                    note  = $targets[$key].note
+                    start = $Now.ToString('yyyy-MM-dd HH:mm:ss')
+                }
+            } else {
+                $webOpen.Remove($key)
+            }
+            $changed = $true
+        }
+    }
+    foreach ($key in $targets.Keys) {
+        if (-not $webOpen.ContainsKey($key)) {
+            $webOpen[$key] = @{
+                exe   = $targets[$key].exe
+                host  = $targets[$key].host
+                basis = $targets[$key].basis
+                note  = $targets[$key].note
+                start = $Now.ToString('yyyy-MM-dd HH:mm:ss')
+            }
+            $changed = $true
+        }
+    }
+    if ($changed) { Save-GuardWebOpen -Open $webOpen }
+}
+
+# ---------------------------------------------------------------------
+# 站点分类（用于分析报告；只做域名后缀匹配，匹配不到归入"其他"）
+# ---------------------------------------------------------------------
+function Get-GuardSiteCategoryMap {
+    if ($script:SiteCategoryMap) { return $script:SiteCategoryMap }
+    $map = @(
+        @{ cat = '视频'; domains = @('bilibili.com', 'douyin.com', 'tiktok.com', 'iqiyi.com', 'youku.com', 'v.qq.com', 'mgtv.com', 'youtube.com', 'netflix.com', 'ixigua.com', 'huya.com', 'douyu.com', 'twitch.tv', 'haokan.baidu.com') },
+        @{ cat = '游戏'; domains = @('steampowered.com', 'steamcommunity.com', 'epicgames.com', '4399.com', '7k7k.com', '17173.com', 'game.qq.com', 'lol.qq.com', 'minecraft.net', 'roblox.com', 'blizzard.com', 'ea.com', 'taptap.com') },
+        @{ cat = '学习'; domains = @('github.com', 'gitlab.com', 'gitee.com', 'csdn.net', 'cnblogs.com', 'juejin.cn', 'leetcode.cn', 'leetcode.com', 'coursera.org', 'edx.org', 'khanacademy.org', 'wikipedia.org', 'baike.baidu.com', 'runoob.com', 'w3school.com.cn', 'icourse163.org', 'xueersi.com', 'zuoyebang.com', 'yuanfudao.com', 'mooc.org') },
+        @{ cat = '社交'; domains = @('weibo.com', 'zhihu.com', 'douban.com', 'tieba.baidu.com', 'qq.com', 'weixin.qq.com', 'facebook.com', 'twitter.com', 'x.com', 'instagram.com', 'reddit.com', 'discord.com', 'telegram.org', 'linkedin.com') },
+        @{ cat = '购物'; domains = @('taobao.com', 'tmall.com', 'jd.com', 'pinduoduo.com', 'yangkeduo.com', 'amazon.com', 'aliexpress.com', 'suning.com', 'vip.com') },
+        @{ cat = '新闻'; domains = @('news.qq.com', 'sina.com.cn', 'weibo.com', 'sohu.com', '163.com', 'thepaper.cn', 'ifeng.com', 'cctv.com', 'people.com.cn') },
+        @{ cat = '工具'; domains = @('baidu.com', 'bing.com', 'google.com', 'sogou.com', 'so.com', 'office.com', 'microsoft.com', 'apple.com', 'aliyun.com', 'notion.so', 'translate.google.com', 'docs.qq.com', 'docs.google.com', 'wps.cn') }
+    )
+    # 展开成"域名 -> 类别"，按域名长度倒序，保证子域优先于父域
+    $flat = @{}
+    foreach ($item in $map) {
+        foreach ($d in $item.domains) { $flat[$d] = $item.cat }
+    }
+    $script:SiteCategoryMap = $flat
+    return $flat
+}
+
+function Get-GuardSiteCategory {
+    param([string]$HostName)
+    $h = ([string]$HostName).ToLowerInvariant()
+    # 没有站点就不是类别：返回空串，由报告单独列为"未归因"，不再出现"未知"类别
+    if ([string]::IsNullOrWhiteSpace($h)) { return '' }
+    $flat = Get-GuardSiteCategoryMap
+    $best = ''
+    $bestCat = ''
+    foreach ($domain in @($flat.Keys)) {
+        if ($h -eq $domain -or $h.EndsWith('.' + $domain)) {
+            if ($domain.Length -gt $best.Length) {
+                $best = $domain
+                $bestCat = [string]$flat[$domain]
+            }
+        }
+    }
+    if ($bestCat) { return $bestCat }
+    return '其他'
+}
+
+function Get-GuardWebSegments {
+    param(
+        [string]$Device,
+        [datetime]$Start,
+        [datetime]$End
+    )
+    $segments = @()
+    $from = $Start.Date.AddDays(-1)
+    $to = $End.Date
+    for ($d = $from; $d -le $to; $d = $d.AddDays(1)) {
+        $file = Join-Path $script:UsageDir ('web_' + $d.ToString('yyyyMMdd') + '.jsonl')
+        if (-not (Test-Path -LiteralPath $file)) { continue }
+        foreach ($line in @([IO.File]::ReadAllLines($file, [Text.Encoding]::UTF8))) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            try { $segments += ($line | ConvertFrom-Json) } catch { }
+        }
+    }
+    # 正在进行的站点会话
+    $webOpen = Read-GuardWebOpen
+    $now = Get-Date
+    foreach ($entry in $webOpen.Values) {
+        $segments += [pscustomobject]@{
+            d       = (Get-GuardDeviceName)
+            exe     = [string]$entry.exe
+            host    = [string]$entry.host
+            s       = [string]$entry.start
+            e       = $now.ToString('yyyy-MM-dd HH:mm:ss')
+            basis   = [string]$entry.basis
+            note    = [string]$entry.note
+            blocked = (Test-GuardDomainBlocked ([string]$entry.host))
+            live    = $true
+        }
+    }
+
+    $result = @()
+    foreach ($rec in $segments) {
+        if (-not [string]::IsNullOrWhiteSpace($Device) -and [string]$rec.d -ne $Device) { continue }
+        $s = $null; $e = $null
+        try { $s = [datetime]::ParseExact([string]$rec.s, 'yyyy-MM-dd HH:mm:ss', $null) } catch { }
+        try { $e = [datetime]::ParseExact([string]$rec.e, 'yyyy-MM-dd HH:mm:ss', $null) } catch { }
+        if (-not $s -or -not $e) { continue }
+        if ($e -le $Start -or $s -ge $End) { continue }
+        if ($s -lt $Start) { $s = $Start }
+        if ($e -gt $End) { $e = $End }
+        $secs = [int][math]::Max(0, ($e - $s).TotalSeconds)
+        if ($secs -lt 1) { continue }
+        $hostName = [string]$rec.host
+        $basis = ''
+        $note = ''
+        $blocked = $false
+        if ($rec.PSObject.Properties['basis']) { $basis = [string]$rec.basis }
+        if ($rec.PSObject.Properties['note']) { $note = [string]$rec.note }
+        if ($rec.PSObject.Properties['blocked']) { $blocked = [bool]$rec.blocked }
+        # 旧数据没有依据字段：有域名就按历史记录归属，空域名单独说明
+        if ([string]::IsNullOrWhiteSpace($basis)) {
+            $basis = $(if ($hostName) { '历史标题匹配' } else { '无页面证据' })
+        }
+        if ([string]::IsNullOrWhiteSpace($note)) {
+            $note = $(if ($hostName) { '' } else { '旧记录：当时未取到可归因的页面信息' })
+        }
+        if (-not $blocked -and $hostName) { $blocked = (Test-GuardDomainBlocked $hostName) }
+        $result += [pscustomobject]@{
+            exe     = [string]$rec.exe
+            host    = $hostName
+            s       = $s
+            e       = $e
+            sec     = $secs
+            basis   = $basis
+            note    = $note
+            blocked = $blocked
+            live    = [bool]$rec.live
+        }
+    }
+    return @($result)
+}
+
+# 单个浏览器当天的站点明细（供程序用量列表展开）。
+# 有站点的时间进 items；没有站点的时间单独放 unattributed，并带上真实原因。
+function Get-GuardSiteDetail {
+    param(
+        [string]$Device,
+        [string]$Date,
+        [string]$Exe
+    )
+    if ([string]::IsNullOrWhiteSpace($Date) -or $Date -notmatch '^\d{8}$') {
+        $Date = (Get-Date).ToString('yyyyMMdd')
+    }
+    $dayStart = [datetime]::ParseExact($Date, 'yyyyMMdd', $null)
+    $dayEnd = $dayStart.AddDays(1)
+    $now = Get-Date
+    if ($dayEnd -gt $now) { $dayEnd = $now }
+
+    $segments = Get-GuardWebSegments -Device $Device -Start $dayStart -End $dayEnd
+    $exeFilter = ([string]$Exe).ToLowerInvariant()
+    $sites = @{}
+    $unattr = @{}
+    foreach ($rec in $segments) {
+        if ($exeFilter -and $rec.exe.ToLowerInvariant() -ne $exeFilter) { continue }
+        $session = [ordered]@{
+            start   = $rec.s.ToString('HH:mm')
+            end     = $(if ($rec.live) { '进行中' } else { $rec.e.ToString('HH:mm') })
+            seconds = $rec.sec
+        }
+        if ([string]::IsNullOrWhiteSpace($rec.host)) {
+            $reason = $(if ($rec.note) { [string]$rec.note } else { '未取到可归因的页面信息' })
+            $uk = [string]$rec.basis + '|' + $reason
+            if (-not $unattr.ContainsKey($uk)) {
+                $unattr[$uk] = [ordered]@{
+                    basis        = [string]$rec.basis
+                    reason       = $reason
+                    totalSeconds = 0
+                    sessions     = @()
+                }
+            }
+            $unattr[$uk].totalSeconds += $rec.sec
+            if ($unattr[$uk].sessions.Count -lt 12) { $unattr[$uk].sessions += $session }
+            continue
+        }
+        $key = $rec.host
+        if (-not $sites.ContainsKey($key)) {
+            $sites[$key] = [ordered]@{
+                host         = $key
+                name         = $key
+                category     = (Get-GuardSiteCategory $key)
+                basis        = [string]$rec.basis
+                blocked      = [bool]$rec.blocked
+                totalSeconds = 0
+                sessions     = @()
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$sites[$key].basis) -and $rec.basis) { $sites[$key].basis = [string]$rec.basis }
+        if ($rec.blocked) { $sites[$key].blocked = $true }
+        $sites[$key].totalSeconds += $rec.sec
+        if ($sites[$key].sessions.Count -lt 12) { $sites[$key].sessions += $session }
+    }
+
+    $items = @()
+    foreach ($k in $sites.Keys) { $items += $sites[$k] }
+    $items = @($items | Sort-Object -Property { $_.totalSeconds } -Descending)
+    $unattrItems = @()
+    foreach ($k in $unattr.Keys) { $unattrItems += $unattr[$k] }
+    $unattrItems = @($unattrItems | Sort-Object -Property { $_.totalSeconds } -Descending)
+    $total = 0
+    foreach ($i in $items) { $total += $i.totalSeconds }
+    $unattrTotal = 0
+    foreach ($i in $unattrItems) { $unattrTotal += $i.totalSeconds }
+    $total += $unattrTotal
+
+    return [ordered]@{
+        date             = $Date
+        device           = $Device
+        exe              = $Exe
+        totalSeconds     = $total
+        unattributedSecs = $unattrTotal
+        items            = @($items)
+        unattributed     = @($unattrItems)
+    }
+}
+
+# 网站使用分析报告（按天 / 按周），供手机面板复用。
+# 口径：totalSeconds = 浏览器可见的总时长；sites = 有具体站点的时间；unattributed = 没有站点的时间及原因。
+# 类别归集和站点排名都不包含 unattributed，避免把"没有站点"混进站点列表。
+function Get-GuardSiteReport {
+    param(
+        [string]$Device,
+        [string]$Date,
+        [string]$Range = 'day'
+    )
+    if ([string]::IsNullOrWhiteSpace($Date) -or $Date -notmatch '^\d{8}$') {
+        $Date = (Get-Date).ToString('yyyyMMdd')
+    }
+    $dayStart = [datetime]::ParseExact($Date, 'yyyyMMdd', $null)
+    $now = Get-Date
+    $dayEnd = $dayStart.AddDays(1)
+    if ($dayEnd -gt $now) { $dayEnd = $now }
+
+    $isWeek = ([string]$Range).ToLowerInvariant() -eq 'week'
+    $start = $(if ($isWeek) { $dayStart.AddDays(-6) } else { $dayStart })
+    $trendStart = $dayStart.AddDays(-6)
+
+    # 一次取够 7 天数据，同时用于区间统计和趋势
+    $segments = Get-GuardWebSegments -Device $Device -Start $trendStart -End $dayEnd
+
+    $sites = @{}
+    $hourly = New-Object 'int[]' 24
+    $total = 0
+    $unattr = @{}
+    $categorySeconds = @{}
+
+    foreach ($rec in $segments) {
+        # 区间内（按天 = 当天；按周 = 最近 7 天）统计，跨午夜的段裁剪到区间边界
+        if ($rec.e -le $start -or $rec.s -ge $dayEnd) { continue }
+        $rs = $rec.s; $re = $rec.e
+        if ($rs -lt $start) { $rs = $start }
+        if ($re -gt $dayEnd) { $re = $dayEnd }
+        $secs = [int][math]::Max(0, ($re - $rs).TotalSeconds)
+        if ($secs -lt 1) { continue }
+        $total += $secs
+        if ($isWeek) {
+            $sStart = $rs.ToString('MM-dd HH:mm')
+            $sEnd = $(if ($rec.live) { '进行中' } else { $re.ToString('HH:mm') })
+        } else {
+            $sStart = $rs.ToString('HH:mm')
+            $sEnd = $(if ($rec.live) { '进行中' } else { $re.ToString('HH:mm') })
+        }
+        if ([string]::IsNullOrWhiteSpace($rec.host)) {
+            # 没有具体站点：按"依据 + 原因"分桶单独说明，不进站点排名/类别
+            $reason = $(if ($rec.note) { [string]$rec.note } else { '未取到可归因的页面信息' })
+            $uk = [string]$rec.basis + '|' + $reason
+            if (-not $unattr.ContainsKey($uk)) {
+                $unattr[$uk] = [ordered]@{
+                    basis        = [string]$rec.basis
+                    reason       = $reason
+                    totalSeconds = 0
+                    sessions     = @()
+                }
+            }
+            $unattr[$uk].totalSeconds += $secs
+            if ($unattr[$uk].sessions.Count -lt 12) {
+                $unattr[$uk].sessions += [ordered]@{ start = $sStart; end = $sEnd; seconds = $secs }
+            }
+        } else {
+            $key = $rec.host
+            if (-not $sites.ContainsKey($key)) {
+                $sites[$key] = [ordered]@{
+                    host         = $key
+                    name         = $key
+                    category     = (Get-GuardSiteCategory $key)
+                    basis        = [string]$rec.basis
+                    blocked      = [bool]$rec.blocked
+                    totalSeconds = 0
+                    sessions     = @()
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$sites[$key].basis) -and $rec.basis) { $sites[$key].basis = [string]$rec.basis }
+            if ($rec.blocked) { $sites[$key].blocked = $true }
+            $sites[$key].totalSeconds += $secs
+            if ($sites[$key].sessions.Count -lt 12) {
+                $sites[$key].sessions += [ordered]@{ start = $sStart; end = $sEnd; seconds = $secs }
+            }
+            $cat = [string]$sites[$key].category
+            if (-not $categorySeconds.ContainsKey($cat)) { $categorySeconds[$cat] = 0 }
+            $categorySeconds[$cat] += $secs
+        }
+
+        # 时段分布：把每段按小时边界切开累计
+        $cursor = $rs
+        while ($cursor -lt $re) {
+            $hourIndex = [int]$cursor.Hour
+            $nextHour = $cursor.Date.AddHours($cursor.Hour + 1)
+            $sliceEnd = $(if ($nextHour -lt $re) { $nextHour } else { $re })
+            $hourly[$hourIndex] += [int][math]::Max(0, ($sliceEnd - $cursor).TotalSeconds)
+            $cursor = $sliceEnd
+        }
+    }
+
+    # 站点排名（不含没有站点的时间）
+    $items = @()
+    foreach ($k in $sites.Keys) { $items += $sites[$k] }
+    $items = @($items | Sort-Object -Property { $_.totalSeconds } -Descending)
+    $attributed = 0
+    foreach ($i in $items) { $attributed += $i.totalSeconds }
+
+    # 未归因时间：单独列出原因，不混进站点列表
+    $unattrItems = @()
+    $unattrTotal = 0
+    foreach ($k in $unattr.Keys) {
+        $unattrItems += $unattr[$k]
+        $unattrTotal += [int]$unattr[$k].totalSeconds
+    }
+    $unattrItems = @($unattrItems | Sort-Object -Property { $_.totalSeconds } -Descending)
+
+    # 占比用"最大余数法"分配：站点 + 未归因合计严格 100%，不出现 101%
+    $denom = [math]::Max($total, 1)
+    $raw = @()
+    foreach ($i in $items) { $raw += (100.0 * $i.totalSeconds / $denom) }
+    foreach ($u in $unattrItems) { $raw += (100.0 * $u.totalSeconds / $denom) }
+    $floors = @(); $fracs = @(); $sumFloor = 0
+    foreach ($v in $raw) {
+        $f = [math]::Floor($v)
+        $floors += [int]$f
+        $fracs += ($v - $f)
+        $sumFloor += [int]$f
+    }
+    $bump = @{}
+    if ($raw.Count -gt 0) {
+        $need = [int](100 - $sumFloor)
+        if ($need -gt 0) {
+            $order = @(0..($raw.Count - 1) | Sort-Object -Property { -1 * $fracs[$_] } | Select-Object -First $need)
+            foreach ($ix in $order) { $bump[[int]$ix] = $true }
+        }
+    }
+    $idx = 0
+    foreach ($i in $items) {
+        $i['percent'] = $floors[$idx] + $(if ($bump.ContainsKey($idx)) { 1 } else { 0 })
+        $idx++
+    }
+    $attributedPct = 0
+    foreach ($i in $items) { $attributedPct += [int]$i['percent'] }
+    foreach ($u in $unattrItems) {
+        $u['percent'] = $floors[$idx] + $(if ($bump.ContainsKey($idx)) { 1 } else { 0 })
+        $idx++
+    }
+
+    # 类别归集：类别只覆盖有站点的部分，占比按"站点占比总量"分配到 100%（不含未归因）
+    $categories = @()
+    foreach ($cat in @($categorySeconds.Keys)) {
+        $categories += [ordered]@{
+            name    = $cat
+            seconds = [int]$categorySeconds[$cat]
+            percent = 0
+        }
+    }
+    $categories = @($categories | Sort-Object -Property { $_.seconds } -Descending)
+    if ($attributedPct -gt 0 -and $categories.Count -gt 0) {
+        $craw = @()
+        foreach ($c in $categories) { $craw += (1.0 * $attributedPct * $c.seconds / [math]::Max($attributed, 1)) }
+        $cfloors = @(); $cfrac = @(); $csum = 0
+        foreach ($v in $craw) {
+            $f = [math]::Floor($v)
+            $cfloors += [int]$f
+            $cfrac += ($v - $f)
+            $csum += [int]$f
+        }
+        $cb = @{}
+        $needc = [int]($attributedPct - $csum)
+        if ($needc -gt 0) {
+            $co = @(0..($craw.Count - 1) | Sort-Object -Property { -1 * $cfrac[$_] } | Select-Object -First $needc)
+            foreach ($ix in $co) { $cb[[int]$ix] = $true }
+        }
+        for ($ci = 0; $ci -lt $categories.Count; $ci++) {
+            $categories[$ci]['percent'] = $cfloors[$ci] + $(if ($cb.ContainsKey($ci)) { 1 } else { 0 })
+        }
+    }
+
+    # 趋势：最近 7 天每天的浏览器总时长
+    $trend = @()
+    for ($i = 6; $i -ge 0; $i--) {
+        $dStart = $dayStart.AddDays(-1 * $i)
+        $dEnd = $dStart.AddDays(1)
+        if ($dEnd -gt $now) { $dEnd = $now }
+        $secs = 0
+        $bestHost = ''
+        $bestSecs = 0
+        $perHost = @{}
+        foreach ($rec in $segments) {
+            if ($rec.e -le $dStart -or $rec.s -ge $dEnd) { continue }
+            $s = $rec.s; $e = $rec.e
+            if ($s -lt $dStart) { $s = $dStart }
+            if ($e -gt $dEnd) { $e = $dEnd }
+            $slice = [int][math]::Max(0, ($e - $s).TotalSeconds)
+            if ($slice -lt 1) { continue }
+            $secs += $slice
+            $h = [string]$rec.host
+            if ([string]::IsNullOrWhiteSpace($h)) { continue }
+            if (-not $perHost.ContainsKey($h)) { $perHost[$h] = 0 }
+            $perHost[$h] += $slice
+        }
+        foreach ($h in $perHost.Keys) {
+            if ($perHost[$h] -gt $bestSecs) { $bestSecs = $perHost[$h]; $bestHost = $h }
+        }
+        $trend += [ordered]@{
+            date    = $dStart.ToString('yyyyMMdd')
+            label   = $dStart.ToString('MM-dd')
+            seconds = $secs
+            topHost = $(if ($bestHost) { $bestHost } else { '' })
+        }
+    }
+
+    # 关注提示
+    $alerts = @()
+    $dayFactor = $(if ($isWeek) { 7 } else { 1 })
+    $avgTotal = [int]($total / $dayFactor)
+    if ($total -lt 300) {
+        $alerts += [ordered]@{ level = 'info'; text = '浏览器使用很少，暂无足够数据做分析。' }
+    } else {
+        if ($unattrTotal -gt 0 -and ($unattrTotal / [math]::Max($total, 1)) -ge 0.4) {
+            $reasonText = (@($unattrItems | Select-Object -First 2 | ForEach-Object { $_.reason }) -join '；')
+            $alerts += [ordered]@{ level = 'warn'; text = ('有 {0} 的浏览器时间没有具体站点（{1}），已在下方单独列出，未计入站点排名。' -f (Format-GuardDuration $unattrTotal), $reasonText) }
+        }
+        if ($items.Count -gt 0 -and $items[0].totalSeconds -ge (2 * 3600) * $dayFactor) {
+            $topName = [string]$items[0].name
+            if ($items[0].blocked) { $topName += '（已拦截）' }
+            $alerts += [ordered]@{ level = 'warn'; text = ('停留在 {0} 的时间较长（{1}），建议关注使用内容。' -f $topName, (Format-GuardDuration $items[0].totalSeconds)) }
+        }
+        $night = 0
+        for ($h = 0; $h -lt 24; $h++) {
+            if ($h -ge 22 -or $h -lt 6) { $night += $hourly[$h] }
+        }
+        if ($night -ge (30 * 60) * $dayFactor) {
+            $alerts += [ordered]@{ level = 'warn'; text = ('夜间（22:00-06:00）浏览器使用 {0}，建议约定作息。' -f (Format-GuardDuration $night)) }
+        }
+        $play = 0
+        foreach ($c in $categories) {
+            if ($c.name -eq '视频' -or $c.name -eq '游戏') { $play += $c.seconds }
+        }
+        if ($play -gt 0 -and ($play / [math]::Max($total, 1)) -ge 0.6 -and $total -ge (45 * 60) * $dayFactor) {
+            $alerts += [ordered]@{ level = 'warn'; text = ('视频/游戏类占比 {0}%，娱乐时间偏多。' -f [int][math]::Round(100 * $play / $total)) }
+        }
+        foreach ($c in $categories) {
+            if ($c.name -eq '学习' -and $c.percent -ge 50) {
+                $alerts += [ordered]@{ level = 'good'; text = ('学习类站点占 {0}%，使用结构良好。' -f $c.percent) }
+                break
+            }
+        }
+        if (-not $isWeek) {
+            $prevDays = @($trend | Where-Object { $_.date -ne $dayStart.ToString('yyyyMMdd') })
+            $prevAvg = 0
+            if ($prevDays.Count -gt 0) {
+                $sum = 0
+                foreach ($t in $prevDays) { $sum += $t.seconds }
+                $prevAvg = [int]($sum / $prevDays.Count)
+            }
+            if ($prevAvg -ge (10 * 60) -and $total -ge (30 * 60) -and $total -gt (1.5 * $prevAvg)) {
+                $alerts += [ordered]@{ level = 'info'; text = ('比前几日平均（{0}）明显增加。' -f (Format-GuardDuration $prevAvg)) }
+            }
+        }
+    }
+
+    return [ordered]@{
+        date             = $Date
+        range            = $(if ($isWeek) { 'week' } else { 'day' })
+        start            = $start.ToString('yyyy-MM-dd')
+        end              = $dayEnd.ToString('yyyy-MM-dd HH:mm')
+        totalSeconds     = $total
+        avgPerDay        = $avgTotal
+        siteCount        = $items.Count
+        attributedSecs   = $attributed
+        unattributedSecs = $unattrTotal
+        sites            = @($items)
+        unattributed     = @($unattrItems)
+        categories       = @($categories)
+        hourly           = @($hourly)
+        trend            = @($trend)
+        alerts           = @($alerts)
     }
 }
 

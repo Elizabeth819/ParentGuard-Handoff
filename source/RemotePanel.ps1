@@ -88,6 +88,61 @@ input:focus{border-color:var(--brand)}
 .toast{position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 22px);transform:translate(-50%,16px);background:#232a3a;border:1px solid var(--line);color:var(--text);padding:11px 16px;border-radius:999px;font-size:13px;opacity:0;pointer-events:none;transition:.2s ease;max-width:86vw;text-align:center}
 .toast.show{opacity:1;transform:translate(-50%,0)}
 .toast.error{border-color:rgba(248,113,113,.5);color:#ffd7d7}
+.usage-devices{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.dev-chip{font-size:13px;padding:7px 12px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);color:var(--muted)}
+.dev-chip.active{border-color:var(--brand);color:var(--text);background:rgba(108,124,255,.14)}
+.usage-days{display:flex;gap:8px;margin-top:10px}
+.day-btn{flex:1;padding:8px;font-size:13px;color:var(--muted)}
+.day-btn.active{color:var(--text);border-color:var(--brand);background:rgba(108,124,255,.14)}
+.usage-item{border-top:1px solid var(--line);padding:11px 0}
+.usage-item:first-child{border-top:none;padding-top:2px}
+.usage-item .top{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.usage-item .pname{font-weight:600;font-size:14px}
+.usage-item .pexe{color:var(--muted);font-size:11px;margin-left:6px}
+.usage-item .ptotal{font-variant-numeric:tabular-nums;font-size:13px;color:var(--brand);font-weight:600;white-space:nowrap}
+.usage-bar{height:5px;background:var(--panel2);border-radius:3px;margin-top:7px;overflow:hidden}
+.usage-bar i{display:block;height:100%;background:var(--brand);border-radius:3px}
+.usage-item .sessions{color:var(--muted);font-size:12px;margin-top:7px;line-height:1.7;font-variant-numeric:tabular-nums}
+.live{color:var(--green);font-weight:600}
+.site-btn{margin-top:7px;background:transparent;border:1px dashed var(--line);color:var(--muted);font-size:12px;padding:5px 10px;border-radius:8px}
+.site-btn.open{color:var(--text);border-style:solid;border-color:var(--brand)}
+.site-panel{border-left:2px solid var(--line);margin:9px 0 2px 2px;padding:2px 0 2px 10px}
+.site-row{display:flex;justify-content:space-between;gap:8px;align-items:baseline;font-size:13px;padding:7px 0;border-top:1px dashed rgba(141,151,171,.18)}
+.site-row:first-child{border-top:none;padding-top:0}
+.site-name{font-weight:600;word-break:break-all}
+.site-cat{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:1px 5px;margin-left:6px;white-space:nowrap}
+.site-dur{color:var(--brand);font-variant-numeric:tabular-nums;white-space:nowrap;font-weight:600}
+.site-times{color:var(--muted);font-size:11px;margin-top:3px;line-height:1.6;font-variant-numeric:tabular-nums}
+.report-sum{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.report-sum .rb{background:var(--panel2);border:1px solid var(--line);border-radius:11px;padding:10px 11px;flex:1;min-width:80px}
+.report-sum .rb .k{color:var(--muted);font-size:11px}
+.report-sum .rb .v{font-size:16px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
+.report-block{margin-top:16px}
+.report-block h3{font-size:12px;font-weight:600;margin:0 0 8px;color:var(--muted);letter-spacing:.04em}
+.rank-row{display:flex;align-items:center;gap:8px;font-size:12.5px;margin-top:8px}
+.rank-row .rn{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rank-row .rb2{flex:0 0 32%;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden}
+.rank-row .rb2 i{display:block;height:100%;background:var(--brand)}
+.rank-row .rv{flex:0 0 64px;text-align:right;color:var(--brand);font-variant-numeric:tabular-nums}
+.cat-row{display:flex;align-items:center;gap:9px;font-size:12px;margin-top:7px}
+.cat-row .cn{width:42px;flex:0 0 auto}
+.cat-row .cb{flex:1;height:6px;background:var(--panel2);border-radius:3px;overflow:hidden}
+.cat-row .cb i{display:block;height:100%;background:var(--brand);border-radius:3px}
+.cat-row .cv{width:92px;flex:0 0 auto;text-align:right;color:var(--muted);font-variant-numeric:tabular-nums}
+.hour-wrap{display:flex;align-items:flex-end;gap:2px;height:60px;margin-top:6px}
+.hour-bar{flex:1;background:var(--panel2);border-radius:2px;min-height:2px}
+.hour-bar i{display:block;background:linear-gradient(180deg,var(--brand),rgba(108,124,255,.35));border-radius:2px;height:100%}
+.hour-labels{display:flex;justify-content:space-between;color:var(--muted);font-size:10px;margin-top:4px}
+.trend-wrap{display:flex;align-items:flex-end;gap:6px;height:64px;margin-top:6px}
+.trend-bar{flex:1;background:var(--panel2);border-radius:4px;min-height:2px}
+.trend-bar i{display:block;height:100%;background:rgba(108,124,255,.5);border-radius:4px}
+.trend-bar.today i{background:var(--brand)}
+.trend-labels{display:flex;gap:6px;margin-top:4px}
+.trend-labels span{flex:1;text-align:center;color:var(--muted);font-size:10px}
+.alert-line{font-size:12.5px;line-height:1.6;padding:8px 10px;border-radius:9px;margin-top:7px;border:1px solid var(--line);background:var(--panel2)}
+.alert-line.warn{border-color:rgba(251,191,36,.45);color:#ffe6a8;background:rgba(251,191,36,.08)}
+.alert-line.good{border-color:rgba(52,211,153,.4);color:#c7f5e4;background:rgba(52,211,153,.08)}
+.alert-line.info{color:var(--muted)}
 </style>
 </head>
 <body>
@@ -140,6 +195,34 @@ input:focus{border-color:var(--brand)}
     <div id="requestList" style="margin-top:8px"></div>
   </div>
 
+  <div class="card">
+    <div class="card-head">
+      <h2>设备与程序用量</h2>
+      <button class="ghost" id="usageRefreshBtn">刷新</button>
+    </div>
+    <div class="usage-devices" id="usageDevices"></div>
+    <div class="usage-days">
+      <button class="day-btn active" data-day="0">今天</button>
+      <button class="day-btn" data-day="1">昨天</button>
+      <button class="day-btn" data-day="2">前天</button>
+    </div>
+    <div id="usageList" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>网站使用分析</h2>
+      <button class="ghost" id="reportRefreshBtn">刷新</button>
+    </div>
+    <div class="usage-days report-tabs">
+      <button class="day-btn active" data-range="day">按天</button>
+      <button class="day-btn" data-range="week">按周</button>
+    </div>
+    <div class="sub" id="reportHint">按天统计所选日期；按周统计截至该日期的最近 7 天</div>
+    <div class="report-sum" id="reportSummary"></div>
+    <div id="reportBody"></div>
+  </div>
+
   <details>
     <summary>最近日志</summary>
     <pre id="logText">点开可加载最近 40 行。</pre>
@@ -161,6 +244,10 @@ input:focus{border-color:var(--brand)}
   var toastEl = document.getElementById("toast");
   var toastTimer = null;
   var refreshTimer = null;
+  var usageDevice = "";
+  var usageDay = 0;
+  var siteReportRange = "day";
+  var sitePanels = {};
 
   function toast(message, isError) {
     toastEl.textContent = message;
@@ -342,6 +429,426 @@ input:focus{border-color:var(--brand)}
     });
   }
 
+  function fmtDur(sec) {
+    sec = Math.max(0, Math.round(sec));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+    if (h > 0) return h + " 小时 " + m + " 分";
+    if (m > 0) return m + " 分钟";
+    return sec + " 秒";
+  }
+
+  function renderDevices(items) {
+    var box = document.getElementById("usageDevices");
+    box.textContent = "";
+    items = normalizeArray(items);
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">暂无设备数据，守护任务运行后自动出现</div>';
+      return;
+    }
+    if (!usageDevice || !items.some(function (d) { return d.name === usageDevice; })) {
+      var cur = items.filter(function (d) { return d.current; });
+      usageDevice = (cur.length ? cur[0] : items[0]).name;
+    }
+    items.forEach(function (d) {
+      var chip = document.createElement("button");
+      chip.className = "dev-chip" + (d.name === usageDevice ? " active" : "");
+      chip.textContent = d.name;
+      chip.title = "最近活跃：" + (d.lastActive || "未知");
+      chip.addEventListener("click", function () { usageDevice = d.name; loadUsage(); });
+      box.appendChild(chip);
+    });
+  }
+
+  function renderUsage(data) {
+    var list = document.getElementById("usageList");
+    list.textContent = "";
+    sitePanels = {};
+    var items = normalizeArray(data.items);
+    if (!items.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "该设备当天暂无程序使用记录";
+      list.appendChild(empty);
+      return;
+    }
+    var max = items[0].totalSeconds || 1;
+    items.forEach(function (p) {
+      var row = document.createElement("div");
+      row.className = "usage-item";
+
+      var top = document.createElement("div");
+      top.className = "top";
+      var left = document.createElement("div");
+      var nm = document.createElement("span");
+      nm.className = "pname";
+      nm.textContent = p.name || p.exe;
+      left.appendChild(nm);
+      var ex = document.createElement("span");
+      ex.className = "pexe";
+      ex.textContent = p.exe;
+      left.appendChild(ex);
+      var total = document.createElement("div");
+      total.className = "ptotal";
+      total.textContent = fmtDur(p.totalSeconds);
+      top.appendChild(left);
+      top.appendChild(total);
+      row.appendChild(top);
+
+      var bar = document.createElement("div");
+      bar.className = "usage-bar";
+      var fill = document.createElement("i");
+      fill.style.width = Math.max(2, Math.round(100 * p.totalSeconds / max)) + "%";
+      bar.appendChild(fill);
+      row.appendChild(bar);
+
+      var sessions = document.createElement("div");
+      sessions.className = "sessions";
+      normalizeArray(p.sessions).forEach(function (s, i) {
+        if (i > 0) sessions.appendChild(document.createTextNode("　"));
+        var span = document.createElement("span");
+        span.textContent = s.start + " – " + s.end;
+        if (s.end === "进行中") {
+          var live = document.createElement("span");
+          live.className = "live";
+          live.textContent = " 进行中";
+          span.appendChild(live);
+        }
+        sessions.appendChild(span);
+      });
+      row.appendChild(sessions);
+
+      // 浏览器可展开查看各网站分别用了多久、几点到几点
+      if (/^(msedge|chrome)\.exe$/i.test(p.exe || "")) {
+        var sbtn = document.createElement("button");
+        sbtn.className = "site-btn";
+        sbtn.textContent = "查看网站明细";
+        sbtn.addEventListener("click", function () { toggleSiteDetail(p.exe, row, sbtn); });
+        row.appendChild(sbtn);
+      }
+
+      list.appendChild(row);
+    });
+  }
+
+  function ymdFor(offsetDays) {
+    var d = new Date(Date.now() - offsetDays * 86400000);
+    return "" + d.getFullYear() +
+      ("0" + (d.getMonth() + 1)).slice(-2) +
+      ("0" + d.getDate()).slice(-2);
+  }
+
+  function toggleSiteDetail(exe, row, btn) {
+    if (sitePanels[exe]) {
+      row.removeChild(sitePanels[exe]);
+      delete sitePanels[exe];
+      btn.textContent = "查看网站明细";
+      btn.classList.remove("open");
+      return;
+    }
+    api("/api/sites?device=" + encodeURIComponent(usageDevice) +
+        "&date=" + ymdFor(usageDay) + "&exe=" + encodeURIComponent(exe))
+      .then(function (d) {
+        var panel = document.createElement("div");
+        panel.className = "site-panel";
+        var items = normalizeArray(d.items);
+        var unattr = normalizeArray(d.unattributed);
+        if (!items.length && !unattr.length) {
+          var em = document.createElement("div");
+          em.className = "empty";
+          em.textContent = "暂无网站记录（正常浏览页面后再查看）";
+          panel.appendChild(em);
+        }
+        items.forEach(function (s) {
+          var r = document.createElement("div");
+          r.className = "site-row";
+          var l = document.createElement("div");
+          var n = document.createElement("span");
+          n.className = "site-name";
+          n.textContent = (s.name || s.host || "") + (s.blocked ? "（已拦截）" : "");
+          l.appendChild(n);
+          if (s.category) {
+            var c = document.createElement("span");
+            c.className = "site-cat";
+            c.textContent = s.category;
+            l.appendChild(c);
+          }
+          var times = document.createElement("div");
+          times.className = "site-times";
+          var parts = [];
+          normalizeArray(s.sessions).forEach(function (x) { parts.push(x.start + " – " + x.end); });
+          times.textContent = parts.join("　") + (s.basis ? "　依据：" + s.basis : "");
+          l.appendChild(times);
+          var dur = document.createElement("div");
+          dur.className = "site-dur";
+          dur.textContent = fmtDur(s.totalSeconds);
+          r.appendChild(l);
+          r.appendChild(dur);
+          panel.appendChild(r);
+        });
+        if (unattr.length) {
+          var uh = document.createElement("div");
+          uh.className = "site-times";
+          uh.textContent = "未归因时间（单独说明，不计入上面的站点）：";
+          panel.appendChild(uh);
+          unattr.forEach(function (u) {
+            var r2 = document.createElement("div");
+            r2.className = "site-row";
+            var l2 = document.createElement("div");
+            var n2 = document.createElement("span");
+            n2.className = "site-name";
+            n2.textContent = (u.reason || "未取到可归因的页面信息") + (u.basis ? "（依据：" + u.basis + "）" : "");
+            l2.appendChild(n2);
+            var t2 = document.createElement("div");
+            t2.className = "site-times";
+            var p2 = [];
+            normalizeArray(u.sessions).forEach(function (x) { p2.push(x.start + " – " + x.end); });
+            t2.textContent = p2.join("　");
+            l2.appendChild(t2);
+            var d2 = document.createElement("div");
+            d2.className = "site-dur";
+            d2.textContent = fmtDur(u.totalSeconds);
+            r2.appendChild(l2);
+            r2.appendChild(d2);
+            panel.appendChild(r2);
+          });
+        }
+        row.appendChild(panel);
+        sitePanels[exe] = panel;
+        btn.textContent = "收起网站明细";
+        btn.classList.add("open");
+      })
+      .catch(function (err) { toast(err.message || "网站明细加载失败", true); });
+  }
+
+  function loadUsage() {
+    if (!token) { return Promise.resolve(); }
+    return api("/api/devices").then(function (d) {
+      renderDevices(d.items);
+      var date = new Date(Date.now() - usageDay * 86400000);
+      var ymd = "" + date.getFullYear() +
+        ("0" + (date.getMonth() + 1)).slice(-2) +
+        ("0" + date.getDate()).slice(-2);
+      return api("/api/usage?device=" + encodeURIComponent(usageDevice) + "&date=" + ymd);
+    }).then(function (u) {
+      renderUsage(u);
+      var btns = document.querySelectorAll("[data-day]");
+      for (var i = 0; i < btns.length; i++) {
+        if (Number(btns[i].getAttribute("data-day")) === usageDay) { btns[i].classList.add("active"); }
+        else { btns[i].classList.remove("active"); }
+      }
+      return loadSiteReport();
+    }).catch(function () { });
+  }
+
+  function loadSiteReport() {
+    if (!token) { return Promise.resolve(); }
+    return api("/api/site-report?device=" + encodeURIComponent(usageDevice) +
+        "&date=" + ymdFor(usageDay) + "&range=" + siteReportRange)
+      .then(function (d) { renderSiteReport(d); })
+      .catch(function () { });
+  }
+
+  function renderSiteReport(d) {
+    var sum = document.getElementById("reportSummary");
+    sum.textContent = "";
+    function metric(k, v) {
+      var b = document.createElement("div");
+      b.className = "rb";
+      var kk = document.createElement("div");
+      kk.className = "k";
+      kk.textContent = k;
+      var vv = document.createElement("div");
+      vv.className = "v";
+      vv.textContent = v;
+      b.appendChild(kk);
+      b.appendChild(vv);
+      sum.appendChild(b);
+    }
+    var total = d.totalSeconds || 0;
+    var unattributed = d.unattributedSecs || 0;
+    var attributed = (typeof d.attributedSecs === "number") ? d.attributedSecs : Math.max(0, total - unattributed);
+    var rate = total > 0 ? Math.round(100 * attributed / total) : 0;
+    metric("浏览器总时长", fmtDur(total));
+    if (d.range === "week") { metric("日均", fmtDur(d.avgPerDay || 0)); }
+    metric("归因站点数", String(normalizeArray(d.sites).length));
+    metric("已归因占比", rate + "%");
+
+    var body = document.getElementById("reportBody");
+    body.textContent = "";
+
+    function addBlock(title) {
+      var b = document.createElement("div");
+      b.className = "report-block";
+      var h = document.createElement("h3");
+      h.textContent = title;
+      b.appendChild(h);
+      body.appendChild(b);
+      return b;
+    }
+
+    // 1) 站点时长排名
+    var sites = normalizeArray(d.sites).slice(0, 8);
+    if (sites.length) {
+      var bSites = addBlock("站点时长排名");
+      var maxSite = sites[0].totalSeconds || 1;
+      sites.forEach(function (s) {
+        var row = document.createElement("div");
+        row.className = "rank-row";
+        var n = document.createElement("div");
+        n.className = "rn";
+        n.textContent = (s.name || s.host || "") + (s.blocked ? "（已拦截）" : "") + " · " + (s.category || "其他");
+        var bar = document.createElement("div");
+        bar.className = "rb2";
+        var fill = document.createElement("i");
+        fill.style.width = Math.max(2, Math.round(100 * s.totalSeconds / maxSite)) + "%";
+        bar.appendChild(fill);
+        var v = document.createElement("div");
+        v.className = "rv";
+        v.textContent = (s.percent || 0) + "%";
+        row.appendChild(n);
+        row.appendChild(bar);
+        row.appendChild(v);
+        bSites.appendChild(row);
+        var tm = document.createElement("div");
+        tm.className = "site-times";
+        var parts = [];
+        normalizeArray(s.sessions).forEach(function (x) { parts.push(x.start + " – " + x.end); });
+        tm.textContent = fmtDur(s.totalSeconds) + "　" + parts.slice(0, 3).join("　") +
+          (parts.length > 3 ? "　…" : "") + (s.basis ? "　依据：" + s.basis : "");
+        bSites.appendChild(tm);
+      });
+    }
+
+    // 2) 未归因时间：单独说明，不混进站点列表
+    var unattr = normalizeArray(d.unattributed);
+    if (unattr.length) {
+      var bUn = addBlock("未归因时间（单独说明，未计入上面的排名与类别）");
+      var head = document.createElement("div");
+      head.className = "site-times";
+      head.textContent = "合计 " + fmtDur(unattributed) + "，按原因列出：";
+      bUn.appendChild(head);
+      unattr.forEach(function (u) {
+        var row = document.createElement("div");
+        row.className = "rank-row";
+        var n = document.createElement("div");
+        n.className = "rn";
+        n.textContent = (u.reason || "未取到可归因的页面信息") +
+          (u.basis ? "（依据：" + u.basis + "）" : "");
+        var v = document.createElement("div");
+        v.className = "rv";
+        v.textContent = fmtDur(u.totalSeconds) + " · " + (u.percent || 0) + "%";
+        row.appendChild(n);
+        row.appendChild(v);
+        bUn.appendChild(row);
+      });
+    }
+
+    // 3) 类别归集
+    var cats = normalizeArray(d.categories);
+    if (cats.length) {
+      var bCats = addBlock("类别归集");
+      cats.forEach(function (c) {
+        var row = document.createElement("div");
+        row.className = "cat-row";
+        var n = document.createElement("div");
+        n.className = "cn";
+        n.textContent = c.name;
+        var bar = document.createElement("div");
+        bar.className = "cb";
+        var fill = document.createElement("i");
+        fill.style.width = Math.max(2, c.percent || 0) + "%";
+        bar.appendChild(fill);
+        var v = document.createElement("div");
+        v.className = "cv";
+        v.textContent = fmtDur(c.seconds) + " · " + (c.percent || 0) + "%";
+        row.appendChild(n);
+        row.appendChild(bar);
+        row.appendChild(v);
+        bCats.appendChild(row);
+      });
+    }
+
+    // 3) 时段分布
+    var hourly = normalizeArray(d.hourly);
+    if (hourly.length === 24) {
+      var bHour = addBlock(d.range === "week" ? "时段分布（近 7 天累计）" : "时段分布");
+      var wrap = document.createElement("div");
+      wrap.className = "hour-wrap";
+      var maxHour = 1;
+      hourly.forEach(function (v) { if (v > maxHour) { maxHour = v; } });
+      hourly.forEach(function (v, i) {
+        var bar = document.createElement("div");
+        bar.className = "hour-bar";
+        bar.title = i + ":00 " + fmtDur(v);
+        var fill = document.createElement("i");
+        fill.style.height = Math.max(2, Math.round(100 * v / maxHour)) + "%";
+        bar.appendChild(fill);
+        wrap.appendChild(bar);
+      });
+      bHour.appendChild(wrap);
+      var labels = document.createElement("div");
+      labels.className = "hour-labels";
+      ["0", "6", "12", "18", "23"].forEach(function (t) {
+        var sp = document.createElement("span");
+        sp.textContent = t + ":00";
+        labels.appendChild(sp);
+      });
+      bHour.appendChild(labels);
+    }
+
+    // 4) 趋势
+    var trend = normalizeArray(d.trend);
+    if (trend.length) {
+      var bTrend = addBlock("最近 7 天趋势");
+      var twrap = document.createElement("div");
+      twrap.className = "trend-wrap";
+      var maxTrend = 1;
+      trend.forEach(function (t) { if (t.seconds > maxTrend) { maxTrend = t.seconds; } });
+      var todayYmd = ymdFor(0);
+      trend.forEach(function (t) {
+        var bar = document.createElement("div");
+        bar.className = "trend-bar" + (t.date === todayYmd ? " today" : "");
+        bar.title = (t.label || t.date) + " " + fmtDur(t.seconds) + (t.topHost ? "（最多：" + t.topHost + "）" : "");
+        var fill = document.createElement("i");
+        fill.style.height = Math.max(2, Math.round(100 * t.seconds / maxTrend)) + "%";
+        bar.appendChild(fill);
+        twrap.appendChild(bar);
+      });
+      bTrend.appendChild(twrap);
+      var tlabels = document.createElement("div");
+      tlabels.className = "trend-labels";
+      trend.forEach(function (t) {
+        var sp = document.createElement("span");
+        sp.textContent = t.label || t.date;
+        tlabels.appendChild(sp);
+      });
+      bTrend.appendChild(tlabels);
+    }
+
+    // 5) 关注提示
+    var alerts = normalizeArray(d.alerts);
+    var bAlerts = addBlock("关注提示");
+    if (!alerts.length) {
+      var ok = document.createElement("div");
+      ok.className = "alert-line info";
+      ok.textContent = "暂无需要特别关注的站点。";
+      bAlerts.appendChild(ok);
+    }
+    alerts.forEach(function (a) {
+      var line = document.createElement("div");
+      line.className = "alert-line " + (a.level || "info");
+      line.textContent = a.text || "";
+      bAlerts.appendChild(line);
+    });
+
+    if (!sites.length && !cats.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "该区间暂无网站使用记录；浏览器正常浏览后会自动累积。";
+      body.appendChild(empty);
+    }
+  }
+
   function load() {
     if (!token) { return Promise.resolve(); }
     return Promise.all([
@@ -350,6 +857,7 @@ input:focus{border-color:var(--brand)}
     ]).then(function (results) {
       renderStatus(results[0].status || results[0]);
       renderRequests(results[1].items);
+      loadUsage();
     }).catch(function (err) {
       toast(err.message || "连接失败", true);
     });
@@ -380,6 +888,42 @@ input:focus{border-color:var(--brand)}
     toast("正在刷新…");
     load();
   });
+
+  document.getElementById("usageRefreshBtn").addEventListener("click", function () {
+    toast("正在刷新…");
+    loadUsage();
+  });
+
+  var dayBtns = document.querySelectorAll("[data-day]");
+  for (var di = 0; di < dayBtns.length; di++) {
+    (function (b) {
+      b.addEventListener("click", function () {
+        usageDay = Number(b.getAttribute("data-day"));
+        loadUsage();
+      });
+    })(dayBtns[di]);
+  }
+
+  document.getElementById("reportRefreshBtn").addEventListener("click", function () {
+    toast("正在刷新…");
+    loadSiteReport();
+  });
+
+  var rangeBtns = document.querySelectorAll("[data-range]");
+  for (var ri = 0; ri < rangeBtns.length; ri++) {
+    (function (b) {
+      b.addEventListener("click", function () {
+        siteReportRange = b.getAttribute("data-range");
+        for (var j = 0; j < rangeBtns.length; j++) {
+          if (rangeBtns[j] === b) { rangeBtns[j].classList.add("active"); }
+          else { rangeBtns[j].classList.remove("active"); }
+        }
+        document.getElementById("reportHint").textContent =
+          siteReportRange === "week" ? "统计截至所选日期的最近 7 天" : "统计所选日期当天";
+        loadSiteReport();
+      });
+    })(rangeBtns[ri]);
+  }
 
   document.querySelector("details").addEventListener("toggle", function (event) {
     if (!event.target.open) { return; }
@@ -561,17 +1105,36 @@ function Get-RequestById {
 }
 
 $listener = New-Object System.Net.HttpListener
+$listenUrls = @("http://127.0.0.1:$port/")
+# 除回环外再监听本机局域网 IPv4：公网入口依赖 Cloudflare 隧道，而 Cloudflare 分配的边缘
+# 地址在部分运营商链路上会被阻断或中途重置，手机端表现为 "load failed"。
+# 局域网入口不经过 Cloudflare，手机连在同一个 Wi-Fi 时可作为备用访问路径；
+# 端口由防火墙规则限定在本网段，未向公网放通。
+foreach ($lip in @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } |
+        Select-Object -ExpandProperty IPAddress)) {
+    $listenUrls += "http://${lip}:$port/"
+}
 try {
-    $listener.Prefixes.Add("http://127.0.0.1:$port/")
+    foreach ($u in $listenUrls) { try { $listener.Prefixes.Add($u) } catch { } }
     $listener.Start()
 } catch {
-    Write-PanelLog ('启动失败：' + $_.Exception.Message)
+    # 局域网前缀注册失败（例如 DHCP 换了地址、URL 保留项没跟上）时回退为仅回环，
+    # 保证面板本身不会因为附加入口而不可用。
+    Write-PanelLog ('局域网入口注册失败，回退为仅回环：' + $_.Exception.Message)
     try { $listener.Close() } catch { }
-    exit
+    $listener = New-Object System.Net.HttpListener
+    $listener.Prefixes.Add("http://127.0.0.1:$port/")
+    try { $listener.Start() } catch {
+        Write-PanelLog ('启动失败：' + $_.Exception.Message)
+        try { $listener.Close() } catch { }
+        exit
+    }
+    $listenUrls = @("http://127.0.0.1:$port/")
 }
 
 $startedAt = Get-Date
-Write-PanelLog ('已启动 http://127.0.0.1:' + $port)
+Write-PanelLog ('已启动 ' + ($listenUrls -join ' , '))
 
 try {
     while ($true) {
@@ -737,6 +1300,48 @@ try {
                     Remove-GuardRequest -Path $item.File
                     Write-GuardAudit 'deny' ('id=' + [string]$body.id) $true
                     Send-Json $context 200 ([ordered]@{ ok = $true; message = '已拒绝该申请' })
+                    break
+                }
+                '/api/devices' {
+                    Send-Json $context 200 ([ordered]@{ ok = $true; items = @(Get-GuardUsageDevices) })
+                    break
+                }
+                '/api/usage' {
+                    $query = [string]$request.Url.Query
+                    $dev = ''
+                    $date = ''
+                    if ($query -match '[?&]device=([^&]*)') { $dev = [Uri]::UnescapeDataString($Matches[1]) }
+                    if ($query -match '[?&]date=(\d{8})') { $date = $Matches[1] }
+                    $report = Get-GuardUsageReport -Device $dev -Date $date
+                    $report['ok'] = $true
+                    Send-Json $context 200 $report
+                    break
+                }
+                '/api/sites' {
+                    $query = [string]$request.Url.Query
+                    $dev = ''
+                    $date = ''
+                    $exe = ''
+                    if ($query -match '[?&]device=([^&]*)') { $dev = [Uri]::UnescapeDataString($Matches[1]) }
+                    if ($query -match '[?&]date=(\d{8})') { $date = $Matches[1] }
+                    if ($query -match '[?&]exe=([^&]*)') { $exe = [Uri]::UnescapeDataString($Matches[1]) }
+                    $detail = Get-GuardSiteDetail -Device $dev -Date $date -Exe $exe
+                    $detail['ok'] = $true
+                    Send-Json $context 200 $detail
+                    break
+                }
+                '/api/site-report' {
+                    $query = [string]$request.Url.Query
+                    $dev = ''
+                    $date = ''
+                    $range = 'day'
+                    if ($query -match '[?&]device=([^&]*)') { $dev = [Uri]::UnescapeDataString($Matches[1]) }
+                    if ($query -match '[?&]date=(\d{8})') { $date = $Matches[1] }
+                    if ($query -match '[?&]range=([a-zA-Z]*)') { $range = $Matches[1] }
+                    if ($range -ne 'week') { $range = 'day' }
+                    $rep = Get-GuardSiteReport -Device $dev -Date $date -Range $range
+                    $rep['ok'] = $true
+                    Send-Json $context 200 $rep
                     break
                 }
                 default {

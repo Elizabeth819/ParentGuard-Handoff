@@ -1,28 +1,27 @@
-# 真实配置与机密（绝不入库）
-config.json
-*.token
-token
-.env
-.env.*
-secrets/
-*.pem
-*.pfx
-
-# 运行时产物
+# 运行时数据
+usage/
 logs/
+backups/
 requests/
-backup/
-heartbeat.json
-state.txt
+*.jsonl
+config.json
+lastobs.json
+open.json
+openweb.json
+
+# 凭据与密钥
+cert.pem
+token
+token.txt
+*.token
+*.pem
+*.key
+
+# 临时/调试
 *.log
+_tmp*
+*.bak*
+*.bak-*
+.screenshots/
+source/bin/
 
-# 二进制与工具
-*.exe
-cloudflared*
-bin/
-
-# 系统与编辑器
-Thumbs.db
-.DS_Store
-.idea/
-.vscode/

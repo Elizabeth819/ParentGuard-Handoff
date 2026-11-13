@@ -72,6 +72,13 @@ try {
             -CooldownMinutes 1 | Out-Null
     }
 
+    # 程序用量采样（每分钟一次，记录带窗口程序的起止时间）
+    try {
+        Update-GuardUsage
+    } catch {
+        Write-Log ('用量采样异常：' + $_.Exception.Message)
+    }
+
     # 手机控制台进程是否在运行
     $listening = $false
     if ([bool]$cfg.remoteEnabled) {

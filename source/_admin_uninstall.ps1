@@ -47,6 +47,8 @@ Write-Step '删除计划任务...'
 & schtasks.exe /End /TN 'ParentGuard-Panel' 2>&1 | Out-Null
 & schtasks.exe /Delete /TN 'ParentGuard-Panel' /F 2>&1 | Out-Null
 & schtasks.exe /Delete /TN 'ParentGuard-Health' /F 2>&1 | Out-Null
+& schtasks.exe /End /TN 'ParentGuard-UsageMeter' 2>&1 | Out-Null
+& schtasks.exe /Delete /TN 'ParentGuard-UsageMeter' /F 2>&1 | Out-Null
 & schtasks.exe /End /TN 'ParentGuard-Tunnel' 2>&1 | Out-Null
 & schtasks.exe /Delete /TN 'ParentGuard-Tunnel' /F 2>&1 | Out-Null
 Get-Process -Name 'cloudflared' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue

@@ -1,6 +1,10 @@
 ﻿# =====================================================================
 #  ParentGuard - 管理员安装（无 GUI）
+#  用法: 右键“以管理员身份运行 PowerShell”，执行本脚本
+#        powershell -NoProfile -ExecutionPolicy Bypass -File _admin_install.ps1 [-VerifyOnly]
 # =====================================================================
+param([switch]$VerifyOnly)
+
 $ErrorActionPreference = 'Continue'
 
 # 禁用控制台"快速编辑模式"：防止鼠标误点窗口导致安装被冻结
@@ -31,6 +35,27 @@ Write-Step '加载 GuardCore...'
 . (Join-Path $PSScriptRoot 'GuardCore.ps1')
 Initialize-GuardPaths
 
+# 仅检查环境，不做任何改动
+if ($VerifyOnly) {
+    $ok = $true
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $isAdmin = (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Write-Host ("管理员权限: {0}" -f $isAdmin); if (-not $isAdmin) { $ok = $false }
+    foreach ($n in @('ParentGuard.ps1','GuardCore.ps1','UsageMeter.ps1','RemotePanel.ps1','watchdog.ps1','health.ps1','Show-Blocked.ps1','RunHidden.vbs')) {
+        $exists = Test-Path (Join-Path $PSScriptRoot $n)
+        Write-Host ("文件 {0}: {1}" -f $n, $exists); if (-not $exists) { $ok = $false }
+    }
+    try { $port = Get-GuardRemotePort } catch { $port = 8787 }
+    $busy = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    Write-Host ("端口 {0}: {1}" -f $port, $(if ($busy) { '被占用' } else { '空闲' }))
+    foreach ($b in @("$env:LOCALAPPDATA\Microsoft\Edge\User Data", "$env:LOCALAPPDATA\Google\Chrome\User Data")) {
+        Write-Host ("浏览器配置 {0}: {1}" -f $b, (Test-Path $b))
+    }
+    Write-Host ('目标安装目录: ' + $script:GuardRoot)
+    Write-Host $(if ($ok) { 'VERIFY_OK' } else { 'VERIFY_FAILED' })
+    exit $(if ($ok) { 0 } else { 1 })
+}
+
 # 准备目录
 foreach ($dir in @($script:GuardRoot, $script:RequestsDir, $script:LogDir, $script:BackupDir)) {
     if ($dir -and -not (Test-Path -LiteralPath $dir)) {
@@ -41,7 +66,7 @@ Write-Step '目录已准备'
 
 # 复制文件
 $srcDir = $PSScriptRoot
-foreach ($name in @('ParentGuard.ps1', 'GuardCore.ps1', 'watchdog.ps1', 'Show-Blocked.ps1', 'RemotePanel.ps1', 'health.ps1', 'cloudflared-panel.ps1', 'cloudflared.exe')) {
+foreach ($name in @('ParentGuard.ps1', 'GuardCore.ps1', 'UsageMeter.ps1', 'watchdog.ps1', 'Show-Blocked.ps1', 'RemotePanel.ps1', 'health.ps1', 'RunHidden.vbs', 'cloudflared-panel.ps1', 'cloudflared.exe')) {
     $s = Join-Path $srcDir $name
     $d = Join-Path $script:GuardRoot $name
     if (Test-Path -LiteralPath $s) {
@@ -54,6 +79,16 @@ foreach ($old in @('BlockedApp.exe', 'BlockedApp.cs')) {
     if (Test-Path -LiteralPath $oldPath) {
         Remove-Item -LiteralPath $oldPath -Force -ErrorAction SilentlyContinue
     }
+}
+# 命名隧道用到的 cloudflared：同时放到安装根目录（GuardCore 按根目录查找）
+$binSrc = Join-Path $srcDir 'bin\cloudflared.exe'
+if (Test-Path -LiteralPath $binSrc) {
+    Copy-Item -LiteralPath $binSrc -Destination (Join-Path $script:GuardRoot 'cloudflared.exe') -Force
+    $binDstDir = Join-Path $script:GuardRoot 'bin'
+    if (-not (Test-Path -LiteralPath $binDstDir)) {
+        New-Item -ItemType Directory -Path $binDstDir -Force | Out-Null
+    }
+    Copy-Item -LiteralPath $binSrc -Destination (Join-Path $binDstDir 'cloudflared.exe') -Force
 }
 Write-Step '文件已复制'
 
@@ -101,6 +136,11 @@ $stubPath = Join-Path $script:GuardRoot 'Show-Blocked.ps1'
 if (Test-Path -LiteralPath $stubPath) {
     & icacls.exe $stubPath /grant:r '*S-1-5-32-545:RX' 2>&1 | Out-Null
 }
+# 无窗口启动器由交互用户会话里的计划任务调用，必须让普通用户可读可执行
+$launcherPath = Join-Path $script:GuardRoot 'RunHidden.vbs'
+if (Test-Path -LiteralPath $launcherPath) {
+    & icacls.exe $launcherPath /grant:r '*S-1-5-32-545:RX' 2>&1 | Out-Null
+}
 Write-Step 'ACL 已设置'
 
 # Firefox 备份
@@ -135,6 +175,28 @@ if (Test-Path -LiteralPath $health) {
     Write-Step '  Health 任务创建完成'
 }
 
+# 程序/网站用量采集：必须在交互用户会话中运行（SYSTEM 看不到用户窗口）。
+# 用 wscript.exe（GUI 子系统）作为启动器，控制台窗口从创建起即隐藏，不会闪烁。
+$meter = Join-Path $script:GuardRoot 'UsageMeter.ps1'
+if (Test-Path -LiteralPath $meter) {
+    try {
+        $launcher = Join-Path $script:GuardRoot 'RunHidden.vbs'
+        & icacls.exe $launcher /grant:r '*S-1-5-32-545:RX' 2>&1 | Out-Null
+        $meterAction = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\wscript.exe') `
+            -Argument ('//B //Nologo "{0}" "{1}" "{2}"' -f $launcher, $psExe, $meter)
+        $meterTrigTime = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1).AddSeconds(30) `
+            -RepetitionInterval (New-TimeSpan -Minutes 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+        $meterTrigLogon = New-ScheduledTaskTrigger -AtLogOn
+        $meterPrincipal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-4' -RunLevel Highest
+        $meterSettings = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
+            -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+        Register-ScheduledTask -TaskName 'ParentGuard-UsageMeter' -Action $meterAction `
+            -Trigger @($meterTrigTime, $meterTrigLogon) -Principal $meterPrincipal `
+            -Settings $meterSettings -Description 'ParentGuard per-user usage collector' -Force | Out-Null
+        Write-Step '  UsageMeter 任务创建完成'
+    } catch { Write-Step ('  [警告] 创建用量采集任务失败：' + $_.Exception.Message) }
+}
+
 # Cloudflare 命名隧道任务（未授权时守护脚本自动等待配置，授权后立即上线）
 $tunnelScript = Join-Path $script:GuardRoot 'cloudflared-panel.ps1'
 if ((Test-Path -LiteralPath $tunnelScript) -and (Test-Path -LiteralPath $script:TunnelExe)) {
@@ -143,6 +205,21 @@ if ((Test-Path -LiteralPath $tunnelScript) -and (Test-Path -LiteralPath $script:
     & schtasks.exe /Run /TN 'ParentGuard-Tunnel' 2>&1 | Out-Null
     Write-Step '  Tunnel 任务创建完成（未授权前待机等待）'
 }
+
+# 笔记本默认“仅在交流电下运行”会让守护/面板在电池供电时停摆：
+# 实测本机因该默认值在拔掉电源后面板与看门狗全部停止，4 天无人恢复。
+foreach ($tn in @('ParentGuard-Watchdog','ParentGuard-Boot','ParentGuard-Panel','ParentGuard-Health','ParentGuard-UsageMeter')) {
+    try {
+        $task = Get-ScheduledTask -TaskName $tn -ErrorAction SilentlyContinue
+        if ($task) {
+            $ts = $task.Settings
+            $ts.DisallowStartIfOnBatteries = $false
+            $ts.StopIfGoingOnBatteries = $false
+            Set-ScheduledTask -TaskName $tn -Settings $ts | Out-Null
+        }
+    } catch { }
+}
+Write-Step '计划任务电池策略已放宽'
 
 if (Test-Path -LiteralPath $panel) {
     if (Start-GuardPanelProcess) {
